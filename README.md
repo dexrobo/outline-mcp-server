@@ -9,23 +9,38 @@ This is a Model Context Protocol (MCP) server that provides access to an [Outlin
 - **Secure:** Redacts sensitive tokens from logs and ensures credentials are never hardcoded.
 - **Sandboxed Creation:** Forces new documents into a specific collection and parent page to prevent clutter.
 
-## Installation
+## Quick Start (Claude Desktop)
 
-```bash
-npm install
+To use this server with Claude Desktop, add it to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "outline": {
+      "command": "npx",
+      "args": ["-y", "github:dexrobo/outline-mcp-server"],
+      "env": {
+        "OUTLINE_URL": "https://your-wiki.getoutline.com",
+        "OUTLINE_API_TOKEN": "your_api_token",
+        "OUTLINE_DEFAULT_COLLECTION_ID": "collection_uuid",
+        "OUTLINE_DEFAULT_PARENT_DOCUMENT_ID": "parent_doc_uuid"
+      }
+    }
+  }
+}
 ```
 
 ## Configuration
 
-The server requires the following environment variables. You can provide them in a `.env` file:
+The server requires the following environment variables.
 
-```env
-OUTLINE_URL=https://your-wiki.getoutline.com
-OUTLINE_API_TOKEN=your_api_token
-OUTLINE_DEFAULT_COLLECTION_ID=collection_uuid_for_new_docs
-OUTLINE_DEFAULT_PARENT_DOCUMENT_ID=parent_doc_uuid_for_new_docs
-LOG_LEVEL=info
-```
+| Variable | Description |
+|----------|-------------|
+| `OUTLINE_URL` | Base URL of your Outline instance (e.g., `https://wiki.example.com`) |
+| `OUTLINE_API_TOKEN` | Your Outline API token (requires write access for upsert) |
+| `OUTLINE_DEFAULT_COLLECTION_ID` | UUID of the collection where new documents will be created |
+| `OUTLINE_DEFAULT_PARENT_DOCUMENT_ID` | UUID of the parent document under which new documents will be nested |
+| `LOG_LEVEL` | Logging level (`info`, `debug`, `error`). Defaults to `info`. |
 
 ### Call-outs & Caveats
 
@@ -39,33 +54,20 @@ LOG_LEVEL=info
 
 ## Usage
 
-### Local (Claude Desktop / Stdio)
+### Local (via npx)
 
-To use this with Claude Desktop, add it to your `claude_desktop_config.json`:
+You can run the server directly using `npx`:
 
-```json
-{
-  "mcpServers": {
-    "outline": {
-      "command": "node",
-      "args": ["/path/to/outline-mcp-server/src/index.js"],
-      "env": {
-        "OUTLINE_URL": "...",
-        "OUTLINE_API_TOKEN": "...",
-        "OUTLINE_DEFAULT_COLLECTION_ID": "...",
-        "OUTLINE_DEFAULT_PARENT_DOCUMENT_ID": "..."
-      }
-    }
-  }
-}
+```bash
+OUTLINE_URL=... OUTLINE_API_TOKEN=... npx github:dexrobo/outline-mcp-server
 ```
 
 ### Remote (SSE / HTTP)
 
-Start the server in SSE mode:
+Start the server in SSE mode (useful for remote deployments):
 
 ```bash
-node src/index.js --transport sse --port 3000
+OUTLINE_URL=... OUTLINE_API_TOKEN=... npx github:dexrobo/outline-mcp-server --transport sse --port 3000
 ```
 
 The discovery URL will be `http://localhost:3000/mcp`.
@@ -79,10 +81,12 @@ The discovery URL will be `http://localhost:3000/mcp`.
 
 ## Development
 
-```bash
-npm run dev
-```
+If you want to contribute or modify the server:
+
+1. Clone the repo: `git clone https://github.com/dexrobo/outline-mcp-server.git`
+2. Install dependencies: `npm install`
+3. Start in dev mode: `npm run dev`
 
 ## Security Notice
 
-This server uses `pino` for logging with automatic redaction of `OUTLINE_API_TOKEN` and `Authorization` headers. Never share your `.env` file or commit it to source control.
+This server uses `pino` for logging with automatic redaction of `OUTLINE_API_TOKEN` and `Authorization` headers. Never share your environment variables or commit them to source control.

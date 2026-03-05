@@ -6,6 +6,19 @@
   "bin": {
     "outline-mcp": "src/index.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dexrobo/outline-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dexrobo/outline-mcp-server/issues"
+  },
+  "homepage": "https://github.com/dexrobo/outline-mcp-server#readme",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
