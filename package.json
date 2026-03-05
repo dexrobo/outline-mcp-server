@@ -6,11 +6,26 @@
   "bin": {
     "outline-mcp": "src/index.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dexrobo/outline-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dexrobo/outline-mcp-server/issues"
+  },
+  "homepage": "https://github.com/dexrobo/outline-mcp-server#readme",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "format": "prettier --write \"src/**/*.js\"",
+    "lint": "eslint src/**/*.js"
   },
   "keywords": [
     "mcp",
@@ -30,9 +45,14 @@
     "pino-pretty": "^13.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.21.0",
     "@jest/globals": "^30.2.0",
     "@types/jest": "^30.0.0",
+    "eslint": "^9.21.0",
+    "fast-check": "^3.23.2",
+    "globals": "^16.0.0",
     "jest": "^30.2.0",
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.1.9",
+    "prettier": "^3.5.2"
   }
 }
