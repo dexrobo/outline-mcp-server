@@ -43,7 +43,7 @@ if (!OUTLINE_URL || !OUTLINE_API_TOKEN) {
 }
 
 // Tool Definitions with Defensive Schema Constraints
-const TOOLS = [
+const getTools = () => [
   {
     name: "documents-list",
     description: "Lists documents in the Outline wiki. Optionally filter by a specific collection.",
@@ -91,7 +91,11 @@ const TOOLS = [
   },
   {
     name: "documents-upsert",
-    description: "Creates a new document when no id is provided, or updates an existing document when id is supplied. New documents are stored in the server-configured collection.",
+    description: `Creates or updates documents. 
+IMPORTANT: This server is sandboxed. 
+- All NEW documents will be created in collection: ${DEFAULT_COLLECTION_ID}.
+- You can provide a 'parentDocumentId' to nest new documents, but the parent MUST be in the same collection.
+- UPDATES are only permitted for existing documents already within this collection.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -119,6 +123,11 @@ const TOOLS = [
           type: "string", 
           format: "uuid",
           description: "Optional template UUID to apply when creating a document." 
+        },
+        parentDocumentId: {
+          type: "string",
+          format: "uuid",
+          description: "Optional parent document UUID for nesting. Must be in the sandbox collection."
         }
       },
       required: ["title", "text"]
@@ -154,7 +163,7 @@ const server = new Server(
 
 // Register Tool Listing
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS
+  tools: getTools()
 }));
 
 // Register Tool Handlers
@@ -187,6 +196,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "documents-upsert": {
         const creating = !args.id;
         const endpoint = creating ? "/api/documents.create" : "/api/documents.update";
+        
+        if (!DEFAULT_COLLECTION_ID) {
+          throw new Error("Server missing OUTLINE_DEFAULT_COLLECTION_ID for sandboxing.");
+        }
+
+        // Enforce Sandboxing: Verify document or parent belongs to the default collection
+        if (creating) {
+          const parentId = args.parentDocumentId || DEFAULT_PARENT_DOCUMENT_ID;
+          if (parentId) {
+            const parentInfo = await callOutline("/api/documents.info", { id: parentId });
+            if (parentInfo.data.collectionId !== DEFAULT_COLLECTION_ID) {
+              throw new Error(`Parent document ${parentId} is outside the sandbox collection.`);
+            }
+          }
+        } else {
+          const docInfo = await callOutline("/api/documents.info", { id: args.id });
+          if (docInfo.data.collectionId !== DEFAULT_COLLECTION_ID) {
+            throw new Error(`Document ${args.id} is outside the sandbox collection and cannot be updated.`);
+          }
+        }
+
         const payload = {
           title: args.title,
           text: args.text,
@@ -194,11 +224,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         if (creating) {
-          if (!DEFAULT_COLLECTION_ID || !DEFAULT_PARENT_DOCUMENT_ID) {
-            throw new Error("Server missing default collection/parent ID for creation.");
-          }
           payload.collectionId = DEFAULT_COLLECTION_ID;
-          payload.parentDocumentId = DEFAULT_PARENT_DOCUMENT_ID;
+          const parentId = args.parentDocumentId || DEFAULT_PARENT_DOCUMENT_ID;
+          if (parentId) {
+            payload.parentDocumentId = parentId;
+          }
           if (args.templateId) payload.templateId = args.templateId;
         } else {
           payload.id = args.id;
