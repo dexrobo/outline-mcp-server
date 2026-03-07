@@ -14,15 +14,19 @@ import pino from "pino";
 import path from "path";
 import os from "os";
 import fs from "fs";
+import mime from "mime-types";
+import FormData from "form-data";
 
 // Load environment variables
-// 1. Try local .env (default behavior)
-dotenv.config();
+if (process.env.NODE_ENV !== "test") {
+  // 1. Try local .env (default behavior)
+  dotenv.config();
 
-// 2. Try global fallback in home directory (~/.outline-mcp.env)
-const globalConfigPath = path.join(os.homedir(), ".outline-mcp.env");
-if (fs.existsSync(globalConfigPath)) {
-  dotenv.config({ path: globalConfigPath });
+  // 2. Try global fallback in home directory (~/.outline-mcp.env)
+  const globalConfigPath = path.join(os.homedir(), ".outline-mcp.env");
+  if (fs.existsSync(globalConfigPath)) {
+    dotenv.config({ path: globalConfigPath, override: true });
+  }
 }
 
 // Setup Logger (Redacts token if it appears)
@@ -39,6 +43,26 @@ const logger = pino({
   redact: ["*.headers.Authorization", "*.token", "*.OUTLINE_API_TOKEN"],
 });
 
+/**
+ * Extracts the identifier from a variety of inputs:
+ * - UUIDs: 550e8400-e29b-41d4-a716-446655440000
+ * - URL Paths: /doc/tutorial-setup-k2KatQyCbK -> k2KatQyCbK
+ * - Full URLs: https://.../doc/title-k2KatQyCbK -> k2KatQyCbK
+ */
+function extractId(input) {
+  if (!input) return input;
+  // If it matches a UUID pattern, return it
+  const uuidRegex =
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+  if (uuidRegex.test(input)) return input;
+
+  // Otherwise, extract the last alphanumeric segment (handling slugs and URLs)
+  const parts = input.split(/[/ ]/).filter(Boolean);
+  const lastPart = parts[parts.length - 1];
+  const idMatch = lastPart.match(/([a-zA-Z0-9]+)$/);
+  return idMatch ? idMatch[1] : lastPart;
+}
+
 // Server Configuration
 const SERVER_NAME = "outline-mcp-server";
 const SERVER_VERSION = "1.0.0";
@@ -46,9 +70,122 @@ const SERVER_VERSION = "1.0.0";
 const DEFAULT_PORT = process.env.PORT || 3000;
 const OUTLINE_URL = process.env.OUTLINE_URL;
 const OUTLINE_API_TOKEN = process.env.OUTLINE_API_TOKEN;
-const DEFAULT_COLLECTION_ID = process.env.OUTLINE_DEFAULT_COLLECTION_ID;
-const DEFAULT_PARENT_DOCUMENT_ID =
-  process.env.OUTLINE_DEFAULT_PARENT_DOCUMENT_ID;
+
+// Global state for resolved UUIDs
+const CONFIG = {
+  rawCollectionId: null,
+  rawParentDocumentId: null,
+  resolvedCollectionId: null,
+  resolvedParentDocumentId: null,
+  isResolved: false,
+};
+
+// Export for test resetting
+export const getCONFIG = () => CONFIG;
+
+const isUuid = (id) =>
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+    id,
+  );
+
+/**
+ * Ensures environment identifiers are resolved to full UUIDs.
+ * Only runs once per server session.
+ */
+async function ensureResolved(outlineConfig) {
+  if (CONFIG.isResolved) return;
+
+  // Initialize from environment
+  CONFIG.rawCollectionId = extractId(process.env.OUTLINE_DEFAULT_COLLECTION_ID);
+  CONFIG.rawParentDocumentId = extractId(
+    process.env.OUTLINE_DEFAULT_PARENT_DOCUMENT_ID,
+  );
+
+  // 1. Resolve Parent Document ID first (it contains the Collection ID)
+  if (CONFIG.rawParentDocumentId) {
+    if (isUuid(CONFIG.rawParentDocumentId)) {
+      CONFIG.resolvedParentDocumentId = CONFIG.rawParentDocumentId;
+    }
+
+    logger.debug(
+      { id: CONFIG.rawParentDocumentId },
+      "Resolving parent document ID...",
+    );
+    // documents.info accepts short IDs natively and returns the full object
+    try {
+      const result = await callOutline(
+        "/api/documents.info",
+        { id: CONFIG.rawParentDocumentId },
+        outlineConfig,
+      );
+      CONFIG.resolvedParentDocumentId = result.data.id;
+
+      // Infer collection from parent if not explicitly set
+      if (!CONFIG.resolvedCollectionId) {
+        CONFIG.resolvedCollectionId = result.data.collectionId;
+        logger.info(
+          { collectionId: CONFIG.resolvedCollectionId },
+          "Inferred sandbox collection from parent document.",
+        );
+      } else if (
+        CONFIG.rawCollectionId &&
+        isUuid(CONFIG.rawCollectionId) &&
+        result.data.collectionId !== CONFIG.rawCollectionId
+      ) {
+        // If both provided, they MUST match
+        throw new Error(
+          `Configuration mismatch: Parent document belongs to collection ${result.data.collectionId}, but OUTLINE_DEFAULT_COLLECTION_ID is set to ${CONFIG.rawCollectionId}`,
+        );
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to resolve OUTLINE_DEFAULT_PARENT_DOCUMENT_ID: ${error.message}`,
+      );
+    }
+  }
+
+  // 2. Resolve Collection ID if still needed
+  if (CONFIG.rawCollectionId && !CONFIG.resolvedCollectionId) {
+    if (isUuid(CONFIG.rawCollectionId)) {
+      CONFIG.resolvedCollectionId = CONFIG.rawCollectionId;
+    } else {
+      logger.debug(
+        { id: CONFIG.rawCollectionId },
+        "Resolving collection short ID...",
+      );
+      const result = await callOutline(
+        "/api/collections.list",
+        {},
+        outlineConfig,
+      );
+      const collection = result.data.find(
+        (c) =>
+          c.urlId === CONFIG.rawCollectionId ||
+          c.id.endsWith(CONFIG.rawCollectionId),
+      );
+      if (!collection) {
+        throw new Error(
+          `Could not resolve collection: ${CONFIG.rawCollectionId}`,
+        );
+      }
+      CONFIG.resolvedCollectionId = collection.id;
+    }
+  }
+
+  CONFIG.isResolved = true;
+  logger.info(
+    {
+      collectionId: CONFIG.resolvedCollectionId,
+      parentId: CONFIG.resolvedParentDocumentId,
+    },
+    "Environment identifiers resolved.",
+  );
+}
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = Number(
+  process.env.OUTLINE_ATTACHMENT_UPLOAD_TIMEOUT_MS || 30000,
+);
+const ATTACHMENT_CLEANUP_ON_FAILURE =
+  process.env.OUTLINE_ATTACHMENT_CLEANUP_ON_FAILURE !== "false";
 
 // Validate Credentials
 if (!OUTLINE_URL || !OUTLINE_API_TOKEN) {
@@ -57,7 +194,7 @@ if (!OUTLINE_URL || !OUTLINE_API_TOKEN) {
 }
 
 // Tool Definitions with Defensive Schema Constraints
-const getTools = () => [
+export const getTools = (defaultCollectionId) => [
   {
     name: "documents-list",
     description:
@@ -110,7 +247,7 @@ const getTools = () => [
     name: "documents-upsert",
     description: `Creates or updates documents. 
 IMPORTANT: This server is sandboxed. 
-- All NEW documents will be created in collection: ${DEFAULT_COLLECTION_ID}.
+- All NEW documents will be created in collection: ${defaultCollectionId}.
 - You can provide a 'parentDocumentId' to nest new documents, but the parent MUST be in the same collection.
 - UPDATES are only permitted for existing documents already within this collection.`,
     inputSchema: {
@@ -149,6 +286,36 @@ IMPORTANT: This server is sandboxed.
           description:
             "Optional parent document UUID for nesting. Must be in the sandbox collection.",
         },
+        attachments: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: {
+                type: "string",
+                description:
+                  "Local file path to the attachment (preferred for large files like videos).",
+              },
+              name: {
+                type: "string",
+                description:
+                  "The name of the file (e.g., video.mp4). Defaults to basename of path.",
+              },
+              contentType: {
+                type: "string",
+                description:
+                  "The MIME type of the file. Will be guessed from path if omitted.",
+              },
+              content: {
+                type: "string",
+                description:
+                  "The base64 encoded content of the file (alternative to path).",
+              },
+            },
+          },
+          description:
+            "Optional list of attachments to upload and associate with the document. Use {{attachment:filename}} in the text to embed them.",
+        },
       },
       required: ["title", "text"],
     },
@@ -156,12 +323,13 @@ IMPORTANT: This server is sandboxed.
 ];
 
 // Helper to call Outline API
-async function callOutline(endpoint, payload = {}) {
-  const url = new URL(endpoint, OUTLINE_URL).toString();
+export async function callOutline(endpoint, payload = {}, config = {}) {
+  const { url: baseUrl, token, logger } = config;
+  const url = new URL(endpoint, baseUrl).toString();
   try {
     const response = await axios.post(url, payload, {
       headers: {
-        Authorization: `Bearer ${OUTLINE_API_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
@@ -170,8 +338,333 @@ async function callOutline(endpoint, payload = {}) {
   } catch (error) {
     const status = error.response?.status;
     const message = error.response?.data?.message || error.message;
-    logger.error({ status, message, endpoint }, "Outline API call failed.");
+    if (logger) {
+      logger.error({ status, message, endpoint }, "Outline API call failed.");
+    }
     throw new Error(`Outline API Error: ${message}`, { cause: error });
+  }
+}
+
+// Handler logic extracted for testing
+export async function handleCallTool(request, config) {
+  const { name, arguments: args } = request.params;
+  const { outlineUrl, outlineToken, logger } = config;
+
+  const outlineConfig = { url: outlineUrl, token: outlineToken, logger };
+
+  // Ensure lazy resolution of environment identifiers
+  await ensureResolved(outlineConfig);
+
+  const defaultCollectionId = CONFIG.resolvedCollectionId;
+  const defaultParentDocumentId = CONFIG.resolvedParentDocumentId;
+
+  switch (name) {
+    case "documents-list": {
+      const result = await callOutline(
+        "/api/documents.list",
+        {
+          collectionId: extractId(args?.collectionId),
+        },
+        outlineConfig,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
+    case "documents-get": {
+      const result = await callOutline(
+        "/api/documents.info",
+        {
+          id: extractId(args.id),
+        },
+        outlineConfig,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
+    case "documents-search": {
+      const result = await callOutline(
+        "/api/documents.search",
+        {
+          query: args.query,
+        },
+        outlineConfig,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
+    case "documents-upsert": {
+      const argId = extractId(args.id);
+      const creating = !argId;
+      const endpoint = creating
+        ? "/api/documents.create"
+        : "/api/documents.update";
+
+      if (!defaultCollectionId) {
+        throw new Error(
+          "Server missing sandbox configuration. Please set OUTLINE_DEFAULT_COLLECTION_ID or OUTLINE_DEFAULT_PARENT_DOCUMENT_ID in your environment.",
+        );
+      }
+
+      // Enforce Sandboxing: Verify document or parent belongs to the default collection
+      if (creating) {
+        const parentId = extractId(args.parentDocumentId) || defaultParentDocumentId;
+        if (parentId) {
+          const parentInfo = await callOutline(
+            "/api/documents.info",
+            {
+              id: parentId,
+            },
+            outlineConfig,
+          );
+          if (parentInfo.data.collectionId !== defaultCollectionId) {
+            throw new Error(
+              `Parent document ${parentId} is outside the sandbox collection.`,
+            );
+          }
+        }
+      } else {
+        const docInfo = await callOutline(
+          "/api/documents.info",
+          {
+            id: argId,
+          },
+          outlineConfig,
+        );
+        if (docInfo.data.collectionId !== defaultCollectionId) {
+          throw new Error(
+            `Document ${argId} is outside the sandbox collection and cannot be updated.`,
+          );
+        }
+      }
+
+      let text = args.text;
+      const attachmentResults = [];
+      const uploadedAttachmentIds = [];
+
+      const cleanupUploadedAttachments = async () => {
+        if (!ATTACHMENT_CLEANUP_ON_FAILURE || uploadedAttachmentIds.length === 0) {
+          return;
+        }
+
+        for (const attachmentId of uploadedAttachmentIds) {
+          try {
+            await callOutline(
+              "/api/attachments.delete",
+              { id: attachmentId },
+              outlineConfig,
+            );
+          } catch (cleanupError) {
+            if (logger?.warn) {
+              logger.warn(
+                { attachmentId, error: cleanupError.message },
+                "Failed to cleanup uploaded attachment after documents-upsert failure.",
+              );
+            }
+          }
+        }
+      };
+
+      let result;
+
+      try {
+        // Handle attachments
+        if (args.attachments && args.attachments.length > 0) {
+          for (const attachment of args.attachments) {
+            try {
+              let bufferOrStream;
+              let size;
+              let contentType = attachment.contentType;
+              let name = attachment.name;
+
+              if (attachment.path) {
+                const fullPath = path.resolve(attachment.path);
+                if (!fs.existsSync(fullPath)) {
+                  throw new Error(`File not found: ${fullPath}`);
+                }
+                const stat = fs.statSync(fullPath);
+                size = stat.size;
+                bufferOrStream = fs.createReadStream(fullPath);
+                if (!name) name = path.basename(fullPath);
+                if (!contentType)
+                  contentType =
+                    mime.lookup(fullPath) || "application/octet-stream";
+              } else if (attachment.content) {
+                const buffer = Buffer.from(attachment.content, "base64");
+                size = buffer.length;
+                bufferOrStream = buffer;
+                if (!name)
+                  throw new Error("Name is required when using base64 content.");
+                if (!contentType) contentType = "application/octet-stream";
+              } else {
+                throw new Error(
+                  "Either 'path' or 'content' must be provided for each attachment.",
+                );
+              }
+
+              const createResponse = await callOutline(
+                "/api/attachments.create",
+                {
+                  name: name,
+                  contentType: contentType,
+                  size: size,
+                  documentId: argId || undefined,
+                },
+                outlineConfig,
+              );
+
+              if (logger) {
+                logger.debug({ createResponse }, "Outline attachments.create response");
+              }
+
+              const { uploadUrl, form, attachment: attachmentInfo } = createResponse.data || {};
+              const id = attachmentInfo?.id;
+
+              if (!id || !uploadUrl) {
+                throw new Error(
+                  "Outline attachments.create response missing required 'attachment.id' or 'uploadUrl'.",
+                );
+              }
+
+              // Step 2: Upload to signed URL
+              if (form) {
+                // Multi-part upload (common for S3 backends)
+                const formData = new FormData();
+                for (const [key, value] of Object.entries(form)) {
+                  formData.append(key, value);
+                }
+                formData.append("file", bufferOrStream, {
+                  filename: name,
+                  contentType: contentType,
+                  knownLength: size,
+                });
+
+                await axios.post(uploadUrl, formData, {
+                  headers: {
+                    ...formData.getHeaders(),
+                  },
+                  maxBodyLength: Infinity,
+                  maxContentLength: Infinity,
+                  timeout: ATTACHMENT_UPLOAD_TIMEOUT_MS,
+                });
+              } else {
+                // Direct PUT upload (common for local/GCS backends)
+                await axios.put(uploadUrl, bufferOrStream, {
+                  headers: {
+                    "Content-Type": contentType,
+                    "Content-Length": size,
+                  },
+                  maxBodyLength: Infinity,
+                  maxContentLength: Infinity,
+                  timeout: ATTACHMENT_UPLOAD_TIMEOUT_MS,
+                });
+              }
+
+              uploadedAttachmentIds.push(id);
+              attachmentResults.push({ name: name, id });
+
+              // Helper to escape regex special characters
+              const escapeRegExp = (string) =>
+                string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+              const attachmentRedirectUrl = `/api/attachments.redirect?id=${id}`;
+
+              // 1. Replace explicit placeholders: {{attachment:filename}} -> id
+              text = text.replaceAll(`{{attachment:${name}}}`, id);
+              if (attachment.path) {
+                text = text.replaceAll(`{{attachment:${attachment.path}}}`, id);
+              }
+
+              /**
+               * Regex Explanation:
+               * (!\[.*?\])        - Group 1: The alt text part like ![image] or [link]
+               * \(                - Opening parenthesis
+               * \s*               - Optional leading whitespace
+               * (FILENAME|PATH)   - The reference we want to replace
+               * (\s+.*?)?         - Group 2: Optional title/caption starting with whitespace (e.g., " "title"")
+               * \s*               - Optional trailing whitespace
+               * \)                - Closing parenthesis
+               */
+              const replaceInMarkdown = (target, replacement, isImage) => {
+                const prefix = isImage ? "!" : "";
+                const regex = new RegExp(
+                  `(${prefix}\\[.*?\\])\\((\\s*)${escapeRegExp(
+                    target,
+                  )}(\\s+.*?)?(\\s*)\\)`,
+                  "g",
+                );
+                return text.replace(regex, `$1($2${replacement}$3$4)`);
+              };
+
+              // Replace in Images (using redirect URL)
+              text = replaceInMarkdown(name, attachmentRedirectUrl, true);
+              if (attachment.path) {
+                text = replaceInMarkdown(attachment.path, attachmentRedirectUrl, true);
+              }
+
+              // Replace in Links (using redirect URL)
+              text = replaceInMarkdown(name, attachmentRedirectUrl, false);
+              if (attachment.path) {
+                text = replaceInMarkdown(attachment.path, attachmentRedirectUrl, false);
+              }
+
+            } catch (error) {
+              logger.error(
+                {
+                  attachment: attachment.name || attachment.path,
+                  error: error.message,
+                },
+                "Failed to upload attachment",
+              );
+              throw new Error(
+                `Failed to upload attachment '${
+                  attachment.name || attachment.path
+                }': ${error.message}`,
+              );
+            }
+          }
+        }
+
+        const payload = {
+          title: args.title,
+          text: text,
+          publish: args.publish ?? true,
+        };
+
+        if (creating) {
+          payload.collectionId = defaultCollectionId;
+          const parentId = extractId(args.parentDocumentId) || defaultParentDocumentId;
+          if (parentId) {
+            payload.parentDocumentId = parentId;
+          }
+          if (args.templateId) payload.templateId = args.templateId;
+        } else {
+          payload.id = argId;
+        }
+
+        result = await callOutline(endpoint, payload, outlineConfig);
+      } catch (error) {
+        await cleanupUploadedAttachments();
+        throw error;
+      }
+
+      // Include attachment IDs in the result for the user's reference
+      if (attachmentResults.length > 0) {
+        result.attachments = attachmentResults;
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
+    default:
+      throw new Error(`Tool '${name}' not found.`);
   }
 }
 
@@ -182,105 +675,21 @@ const server = new Server(
 );
 
 // Register Tool Listing
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: getTools(),
-}));
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  await ensureResolved({ url: OUTLINE_URL, token: OUTLINE_API_TOKEN, logger });
+  return {
+    tools: getTools(CONFIG.resolvedCollectionId || CONFIG.rawCollectionId),
+  };
+});
 
 // Register Tool Handlers
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
   try {
-    switch (name) {
-      case "documents-list": {
-        const result = await callOutline("/api/documents.list", {
-          collectionId: args?.collectionId,
-        });
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "documents-get": {
-        const result = await callOutline("/api/documents.info", {
-          id: args.id,
-        });
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "documents-search": {
-        const result = await callOutline("/api/documents.search", {
-          query: args.query,
-        });
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      case "documents-upsert": {
-        const creating = !args.id;
-        const endpoint = creating
-          ? "/api/documents.create"
-          : "/api/documents.update";
-
-        if (!DEFAULT_COLLECTION_ID) {
-          throw new Error(
-            "Server missing OUTLINE_DEFAULT_COLLECTION_ID for sandboxing.",
-          );
-        }
-
-        // Enforce Sandboxing: Verify document or parent belongs to the default collection
-        if (creating) {
-          const parentId = args.parentDocumentId || DEFAULT_PARENT_DOCUMENT_ID;
-          if (parentId) {
-            const parentInfo = await callOutline("/api/documents.info", {
-              id: parentId,
-            });
-            if (parentInfo.data.collectionId !== DEFAULT_COLLECTION_ID) {
-              throw new Error(
-                `Parent document ${parentId} is outside the sandbox collection.`,
-              );
-            }
-          }
-        } else {
-          const docInfo = await callOutline("/api/documents.info", {
-            id: args.id,
-          });
-          if (docInfo.data.collectionId !== DEFAULT_COLLECTION_ID) {
-            throw new Error(
-              `Document ${args.id} is outside the sandbox collection and cannot be updated.`,
-            );
-          }
-        }
-
-        const payload = {
-          title: args.title,
-          text: args.text,
-          publish: args.publish ?? true,
-        };
-
-        if (creating) {
-          payload.collectionId = DEFAULT_COLLECTION_ID;
-          const parentId = args.parentDocumentId || DEFAULT_PARENT_DOCUMENT_ID;
-          if (parentId) {
-            payload.parentDocumentId = parentId;
-          }
-          if (args.templateId) payload.templateId = args.templateId;
-        } else {
-          payload.id = args.id;
-        }
-
-        const result = await callOutline(endpoint, payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      default:
-        throw new Error(`Tool '${name}' not found.`);
-    }
+    return await handleCallTool(request, {
+      outlineUrl: OUTLINE_URL,
+      outlineToken: OUTLINE_API_TOKEN,
+      logger,
+    });
   } catch (error) {
     return {
       isError: true,
@@ -323,4 +732,6 @@ program
     }
   });
 
-program.parse();
+if (import.meta.url === `file://${fs.realpathSync(process.argv[1])}`) {
+  program.parse();
+}
