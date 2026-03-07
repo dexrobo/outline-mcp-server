@@ -71,7 +71,7 @@ function extractId(input, baseUrl) {
     } else {
       throw new Error("Not a URL");
     }
-  } catch (e) {
+  } catch {
     // Fallback if URL parsing fails or is skipped (e.g. just a slug or simple ID)
     const segments = input.split(/[ /]/).filter(Boolean);
     const last = segments[segments.length - 1];
@@ -109,6 +109,7 @@ const CONFIG = {
   rawParentDocumentId: null,
   resolvedCollectionId: null,
   resolvedParentDocumentId: null,
+  collectionResolutionCache: new Map(),
   isResolved: false,
 };
 
@@ -119,6 +120,39 @@ const isUuid = (id) =>
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
     id,
   );
+
+function primeCollectionResolutionCache(collections) {
+  if (!Array.isArray(collections)) return;
+
+  const uniqueNameToId = new Map();
+  const duplicateNames = new Set();
+
+  for (const collection of collections) {
+    if (!collection?.id) continue;
+
+    CONFIG.collectionResolutionCache.set(collection.id, collection.id);
+    if (collection.urlId) {
+      CONFIG.collectionResolutionCache.set(collection.urlId, collection.id);
+    }
+
+    const normalizedName = collection.name?.toLowerCase().trim();
+    if (!normalizedName) continue;
+
+    if (duplicateNames.has(normalizedName)) continue;
+
+    if (uniqueNameToId.has(normalizedName)) {
+      uniqueNameToId.delete(normalizedName);
+      duplicateNames.add(normalizedName);
+      continue;
+    }
+
+    uniqueNameToId.set(normalizedName, collection.id);
+  }
+
+  for (const [normalizedName, id] of uniqueNameToId.entries()) {
+    CONFIG.collectionResolutionCache.set(`name:${normalizedName}`, id);
+  }
+}
 
 /**
  * Ensures environment identifiers are resolved to full UUIDs.
@@ -196,6 +230,7 @@ async function ensureResolved(outlineConfig) {
         {},
         outlineConfig,
       );
+      primeCollectionResolutionCache(result.data);
       const collection = result.data.find(
         (c) =>
           c.urlId === CONFIG.rawCollectionId ||
@@ -225,10 +260,19 @@ const ATTACHMENT_UPLOAD_TIMEOUT_MS = Number(
 const ATTACHMENT_CLEANUP_ON_FAILURE =
   process.env.OUTLINE_ATTACHMENT_CLEANUP_ON_FAILURE !== "false";
 
-// Validate Credentials
-if (!OUTLINE_URL || !OUTLINE_API_TOKEN) {
-  logger.error("Missing OUTLINE_URL or OUTLINE_API_TOKEN in environment.");
-  process.exit(1);
+function assertOutlineConfigured(config) {
+  const missing = [];
+
+  if (!config?.url) missing.push("OUTLINE_URL");
+  if (!config?.token) missing.push("OUTLINE_API_TOKEN");
+
+  if (missing.length === 0) return;
+
+  throw new Error(
+    `Outline MCP server is not configured. Missing required environment variable(s): ${missing.join(
+      ", ",
+    )}.`,
+  );
 }
 
 function validateOneOf(args, fields, required = false) {
@@ -417,7 +461,7 @@ MANDATE: DO NOT use 'curl' for Outline. Always use this tool for updates.
     description: `Creates or updates documents. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool.
 IMPORTANT: This server is sandboxed. 
 - Use this primarily for CREATING new documents. For updates, prefer 'documents-patch'.
-- All NEW documents will be created in collection: ${defaultCollectionId}.
+- All NEW documents will be created in collection: ${defaultCollectionId || "the configured sandbox collection"}.
 - New documents are automatically formatted with Prettier for consistency.`,
     inputSchema: {
       type: "object",
@@ -626,7 +670,7 @@ function replaceMarkdownTargets(text, targets, replacement) {
  */
 function validateMarkdown(text, logger) {
   try {
-    const tree = unified().use(remarkParse).parse(text);
+    unified().use(remarkParse).parse(text);
 
     // 1. Check for dangling attachment placeholders
     // (This catches LLM typos like {{attachment:mispelled.png}})
@@ -664,9 +708,20 @@ async function resolveCollectionId(input, outlineConfig) {
     /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
   if (uuidRegex.test(directId)) return directId;
 
+  if (CONFIG.collectionResolutionCache.has(directId)) {
+    return CONFIG.collectionResolutionCache.get(directId);
+  }
+
+  const searchName = input.toLowerCase().trim();
+  const cachedNameMatch = CONFIG.collectionResolutionCache.get(`name:${searchName}`);
+  if (cachedNameMatch) {
+    return cachedNameMatch;
+  }
+
   // 2. Fetch all collections to check for name matches
   const result = await callOutline("/api/collections.list", {}, outlineConfig);
   const collections = result.data || [];
+  primeCollectionResolutionCache(collections);
 
   // 3. Try to find a collection by exact short ID/slug match first (canonical)
   const idMatch = collections.find(
@@ -675,7 +730,6 @@ async function resolveCollectionId(input, outlineConfig) {
   if (idMatch) return idMatch.id;
 
   // 4. Try case-insensitive name match
-  const searchName = input.toLowerCase().trim();
   const nameMatches = collections.filter(
     (c) => c.name.toLowerCase().trim() === searchName,
   );
@@ -711,6 +765,8 @@ export async function handleCallTool(request, config) {
   const { outlineUrl, outlineToken, logger } = config;
 
   const outlineConfig = { url: outlineUrl, token: outlineToken, logger };
+
+  assertOutlineConfigured(outlineConfig);
 
   // Ensure lazy resolution of environment identifiers
   await ensureResolved(outlineConfig);
@@ -830,8 +886,21 @@ export async function handleCallTool(request, config) {
           );
         }
         if (occurrences > 1) {
+          // Find contextual snippets for each match to help the agent disambiguate
+          const snippets = [];
+          let currentPos = text.indexOf(search);
+          let matchCount = 0;
+          while (currentPos !== -1 && matchCount < 5) {
+            matchCount++;
+            const contextStart = currentPos;
+            const contextEnd = Math.min(text.length, currentPos + search.length + 60);
+            const snippet = text.slice(contextStart, contextEnd).replace(/\n/g, "\\n");
+            snippets.push(`Match ${matchCount}: "${snippet}..."`);
+            currentPos = text.indexOf(search, currentPos + 1);
+          }
+
           throw new Error(
-            `Patch failed: Search string is ambiguous and matches ${occurrences} times. Please provide more surrounding context to make it unique: "${search.slice(0, 50)}..."`,
+            `Patch failed: Search string is ambiguous and matches ${occurrences} times.\nMANDATE: To preserve Outline formatting, you MUST refine the 'search' string rather than switching to upsert.\nPlease include more surrounding context from one of these occurrences to make it unique:\n${snippets.join("\n")}`,
           );
         }
         // Using a function for replacement prevents '$' special character bugs
@@ -873,7 +942,7 @@ export async function handleCallTool(request, config) {
         const inputParent = validateOneOf(args, ["parentId", "parentUrl"]);
         const parentId =
           extractId(inputParent, outlineUrl) || defaultParentDocumentId;
-        if (parentId) {
+        if (parentId && parentId !== defaultParentDocumentId) {
           const parentInfo = await callOutline(
             "/api/documents.info",
             {
@@ -1143,14 +1212,15 @@ async function handleAttachmentUpsert(
       payload.id = argId;
     }
 
+    // Final safety check must happen before the write so validation errors
+    // don't return failure after Outline has already been mutated.
+    validateMarkdown(text, logger);
+
     result = await callOutline(endpoint, payload, outlineConfig);
   } catch (error) {
     await cleanupUploadedAttachments();
     throw error;
   }
-
-  // Final Safety Validation
-  validateMarkdown(text, logger);
 
   // Include attachment IDs in the result for the user's reference
   if (attachmentResults.length > 0) {
@@ -1168,7 +1238,6 @@ const server = new Server(
 
 // Register Tool Listing
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  await ensureResolved({ url: OUTLINE_URL, token: OUTLINE_API_TOKEN, logger });
   return {
     tools: getTools(CONFIG.resolvedCollectionId || CONFIG.rawCollectionId),
   };

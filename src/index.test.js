@@ -54,25 +54,30 @@ describe("Outline MCP Server Tools - Attachments", () => {
   });
 
   afterEach(() => {
-    jest.clearAllMocks();
+    axiosMock.post.mockReset();
+    axiosMock.put.mockReset();
+    fsMock.existsSync.mockReset();
+    fsMock.statSync.mockReset();
+    fsMock.createReadStream.mockReset();
+    fsMock.realpathSync.mockReset();
+
     // Reset internal state for identifiers resolution
     if (mod && mod.getCONFIG) {
       const internalConfig = mod.getCONFIG();
+      internalConfig.rawCollectionId = null;
+      internalConfig.rawParentDocumentId = null;
       internalConfig.isResolved = false;
       internalConfig.resolvedCollectionId = null;
       internalConfig.resolvedParentDocumentId = null;
+      internalConfig.collectionResolutionCache = new Map();
     }
   });
 
   it("should handle documents-upsert with base64 attachments", async () => {
-    // 1. Mock parent info (sandboxing check - called TWICE: once for resolution, once for sandboxing)
-    axiosMock.post
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      });
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
 
     // 2. Mock attachment create
     axiosMock.post.mockResolvedValueOnce({
@@ -132,6 +137,10 @@ describe("Outline MCP Server Tools - Attachments", () => {
       expect.any(Object),
     );
 
+    expect(
+      axiosMock.post.mock.calls.filter((c) => c[0].endsWith("/api/documents.info")),
+    ).toHaveLength(1);
+
     expect(JSON.parse(result.content[0].text).attachments[0].id).toBe("attach-123");
   });
 
@@ -143,13 +152,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
     fsMock.createReadStream.mockReturnValue(mockStream);
 
     // 1. Mock parent info
-    axiosMock.post
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
 
     // 2. Mock attachment create
     axiosMock.post.mockResolvedValueOnce({
@@ -241,9 +246,6 @@ describe("Outline MCP Server Tools - Attachments", () => {
         data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
       })
       .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
-      .mockResolvedValueOnce({
         data: {
           data: {
             uploadUrl: "https://s3.test/upload-post",
@@ -289,9 +291,6 @@ describe("Outline MCP Server Tools - Attachments", () => {
         data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
       })
       .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
-      .mockResolvedValueOnce({
         data: {
           data: {
             uploadUrl: "https://s3.test/upload",
@@ -332,9 +331,6 @@ describe("Outline MCP Server Tools - Attachments", () => {
     fsMock.createReadStream.mockReturnValue({ pipe: jest.fn() });
 
     axiosMock.post
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
       .mockResolvedValueOnce({
         data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
       })
@@ -394,6 +390,35 @@ describe("Outline MCP Server Tools - Attachments", () => {
     expect(upsertTool.inputSchema.properties.parentId).toBeDefined();
     expect(upsertTool.inputSchema.properties.parentUrl).toBeDefined();
     expect(upsertTool.inputSchema.properties.attachments.items.oneOf).toHaveLength(2);
+  });
+
+  it("should keep tool discovery usable before the server is configured", () => {
+    const tools = getTools();
+    const upsertTool = tools.find((tool) => tool.name === "documents-upsert");
+
+    expect(upsertTool.description).toContain("the configured sandbox collection");
+  });
+
+  it("should fail tool calls with a clear error when Outline env is missing", async () => {
+    await expect(
+      handleCallTool(
+        {
+          params: {
+            name: "documents-list",
+            arguments: {},
+          },
+        },
+        {
+          outlineUrl: "",
+          outlineToken: "",
+          logger: config.logger,
+        },
+      ),
+    ).rejects.toThrow(
+      "Outline MCP server is not configured. Missing required environment variable(s): OUTLINE_URL, OUTLINE_API_TOKEN.",
+    );
+
+    expect(axiosMock.post).not.toHaveBeenCalled();
   });
 
   it("should handle documents-patch with surgical search and replace", async () => {
@@ -479,15 +504,18 @@ describe("Outline MCP Server Tools - Attachments", () => {
     );
   });
 
-  it("should fail documents-patch if search string is ambiguous", async () => {
+  it("should fail documents-patch if search string is ambiguous and provide snippets", async () => {
+    // 1. Mock parent info (resolution)
     axiosMock.post.mockResolvedValueOnce({
       data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
     });
+
+    // 2. Mock documents.info with duplicate content
     axiosMock.post.mockResolvedValueOnce({
       data: {
         data: {
           id: "doc-123",
-          text: "Double Double",
+          text: "## Setup\nFirst section.\n\n## Setup\nSecond section.",
           collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
         },
       },
@@ -498,16 +526,22 @@ describe("Outline MCP Server Tools - Attachments", () => {
         name: "documents-patch",
         arguments: {
           documentId: "doc-123",
-          patches: [{ search:
- "Double", replace: "X" }],
+          patches: [{ search: "## Setup", replace: "## Refined" }],
         },
       },
     };
 
-    await expect(handleCallTool(request, config)).rejects.toThrow(
-      "Search string is ambiguous and matches 2 times",
+    const errorRegex = new RegExp(
+      "Search string is ambiguous and matches 2 times.*" +
+        "MANDATE: To preserve Outline formatting, you MUST refine.*" +
+        "Match 1: \"## Setup\\\\nFirst section.*" +
+        "Match 2: \"## Setup\\\\nSecond section",
+      "s",
     );
+
+    await expect(handleCallTool(request, config)).rejects.toThrow(errorRegex);
   });
+
 
   it("should handle special $ characters in documents-patch replacement", async () => {
     axiosMock.post.mockResolvedValueOnce({
@@ -591,13 +625,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
 
   it("should format new documents with Prettier in documents-upsert", async () => {
     // 1. Mock parent info (resolution + sandbox check)
-    axiosMock.post
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
 
     // 2. Mock document create
     axiosMock.post.mockResolvedValueOnce({
@@ -633,15 +663,7 @@ describe("Outline MCP Server Tools - Attachments", () => {
     axiosMock.post
       .mockResolvedValueOnce({
         data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
-      })
-      .mockResolvedValueOnce({
-        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
       });
-
-    // 2. Mock document create
-    axiosMock.post.mockResolvedValueOnce({
-      data: { data: { id: "doc-fail", title: "Fail Doc" } },
-    });
 
     const request = {
       params: {
@@ -656,6 +678,10 @@ describe("Outline MCP Server Tools - Attachments", () => {
     await expect(handleCallTool(request, config)).rejects.toThrow(
       "Found unreplaced attachment placeholder",
     );
+
+    expect(
+      axiosMock.post.mock.calls.some((c) => c[0].endsWith("/api/documents.create")),
+    ).toBe(false);
   });
 
   it("should handle various identifier formats in documents-get", async () => {
@@ -736,6 +762,45 @@ describe("Outline MCP Server Tools - Attachments", () => {
       expect.objectContaining({ collectionId: "unique-uuid" }),
       expect.any(Object),
     );
+  });
+
+  it("should cache collection resolution across tool calls in the same session", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [{ id: "unique-uuid", name: "Unique Name", urlId: "unique-name" }] },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "documents-list",
+          arguments: { collectionName: "Unique Name" },
+        },
+      },
+      config,
+    );
+
+    await handleCallTool(
+      {
+        params: {
+          name: "documents-search",
+          arguments: { query: "latency", collectionName: "Unique Name" },
+        },
+      },
+      config,
+    );
+
+    expect(
+      axiosMock.post.mock.calls.filter((c) => c[0].endsWith("/api/collections.list")),
+    ).toHaveLength(1);
   });
 
   it("should handle documents-list WITHOUT collectionId", async () => {
