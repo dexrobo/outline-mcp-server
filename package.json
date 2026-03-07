@@ -23,7 +23,11 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test": "npm run lint && node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:mcp": "node scripts/test-mcp.js",
+    "test:mcp:ci": "node scripts/run-with-timeout.js 45000 \"npm run test:mcp\"",
+    "validate": "npm run lint && npm run test:unit && npm audit",
     "format": "prettier --write \"src/**/*.js\"",
     "lint": "eslint src/**/*.js"
   },
@@ -41,6 +45,8 @@
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "form-data": "^4.0.5",
+    "mime-types": "^3.0.2",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0"
   },
