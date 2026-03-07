@@ -383,13 +383,182 @@ describe("Outline MCP Server Tools - Attachments", () => {
 
     expect(listTool.inputSchema.properties.collectionName).toBeDefined();
     expect(listTool.inputSchema.properties.collectionUrl).toBeDefined();
+    expect(listTool.inputSchema.properties.limit).toBeDefined();
 
     expect(getTool.inputSchema.properties.documentId).toBeDefined();
     expect(getTool.inputSchema.properties.documentUrl).toBeDefined();
+    expect(getTool.inputSchema.properties.includeText).toBeDefined();
 
     expect(upsertTool.inputSchema.properties.parentId).toBeDefined();
     expect(upsertTool.inputSchema.properties.parentUrl).toBeDefined();
     expect(upsertTool.inputSchema.properties.attachments.items.oneOf).toHaveLength(2);
+  });
+
+  it("should keep a direct no-curl instruction in every Outline tool description", () => {
+    for (const tool of getTools("sandbox-collection")) {
+      expect(tool.description.toLowerCase()).toContain("never use curl");
+    }
+  });
+
+  it("should preserve behavior-shaping guidance in documents-patch description", () => {
+    const patchTool = getTools("sandbox-collection").find(
+      (tool) => tool.name === "documents-patch",
+    );
+
+    expect(patchTool.description).toContain("PREFERRED for edits to existing documents");
+    expect(patchTool.description).toContain(
+      "Do not switch to documents-upsert unless you truly need full-document replacement",
+    );
+    expect(patchTool.description).toContain("Include surrounding context");
+    expect(patchTool.description).toContain("byte-for-byte identical");
+  });
+
+  it("should return metadata-only document-get payloads by default", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "Compact Doc",
+          text: "Hello world",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+          url: "/doc/compact",
+        },
+      },
+    });
+
+    const result = await handleCallTool(
+      {
+        params: {
+          name: "documents-get",
+          arguments: { documentId: "doc-123" },
+        },
+      },
+      config,
+    );
+
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      document: {
+        id: "doc-123",
+        title: "Compact Doc",
+        url: "/doc/compact",
+        collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        excerpt: "Hello world",
+      },
+    });
+  });
+
+  it("should include full text in documents-get when includeText is true", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "Compact Doc",
+          text: "Hello world",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+          url: "/doc/compact",
+        },
+      },
+    });
+
+    const result = await handleCallTool(
+      {
+        params: {
+          name: "documents-get",
+          arguments: { documentId: "doc-123", includeText: true },
+        },
+      },
+      config,
+    );
+
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      document: {
+        id: "doc-123",
+        title: "Compact Doc",
+        url: "/doc/compact",
+        collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        text: "Hello world",
+      },
+    });
+  });
+
+  it("should derive document excerpts from the first meaningful markdown paragraph", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "Compact Doc",
+          text: "# Heading\n\nThis is the first real paragraph with **important** context.\n\n- Backup item",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+          url: "/doc/compact",
+        },
+      },
+    });
+
+    const result = await handleCallTool(
+      {
+        params: {
+          name: "documents-get",
+          arguments: { documentId: "doc-123" },
+        },
+      },
+      config,
+    );
+
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      document: {
+        id: "doc-123",
+        title: "Compact Doc",
+        url: "/doc/compact",
+        collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        excerpt: "This is the first real paragraph with important context.",
+      },
+    });
+  });
+
+  it("should fall back to list content when no paragraph excerpt is available", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "Compact Doc",
+          text: "# Heading\n\n- First useful bullet\n- Second bullet",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+          url: "/doc/compact",
+        },
+      },
+    });
+
+    const result = await handleCallTool(
+      {
+        params: {
+          name: "documents-get",
+          arguments: { documentId: "doc-123" },
+        },
+      },
+      config,
+    );
+
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      document: {
+        id: "doc-123",
+        title: "Compact Doc",
+        url: "/doc/compact",
+        collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        excerpt: "First useful bullet",
+      },
+    });
   });
 
   it("should keep tool discovery usable before the server is configured", () => {
@@ -764,6 +933,31 @@ describe("Outline MCP Server Tools - Attachments", () => {
     );
   });
 
+  it("should pass limit through in documents-list", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "documents-list",
+          arguments: { limit: 5 },
+        },
+      },
+      config,
+    );
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/documents.list"),
+      { limit: 5 },
+      expect.any(Object),
+    );
+  });
+
   it("should cache collection resolution across tool calls in the same session", async () => {
     axiosMock.post.mockResolvedValueOnce({
       data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
@@ -883,7 +1077,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
       {},
       expect.any(Object),
     );
-    expect(result.content[0].text).toContain("Performance");
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      collections: [{ id: "col-1", name: "Performance" }],
+    });
   });
 
   it("should handle documents-search with optional collectionId", async () => {
@@ -920,6 +1116,31 @@ describe("Outline MCP Server Tools - Attachments", () => {
         query: "latency",
         collectionId: "ID123",
       }),
+      expect.any(Object),
+    );
+  });
+
+  it("should pass limit through in documents-search", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "documents-search",
+          arguments: { query: "latency", limit: 3 },
+        },
+      },
+      config,
+    );
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/documents.search"),
+      { query: "latency", limit: 3 },
       expect.any(Object),
     );
   });
