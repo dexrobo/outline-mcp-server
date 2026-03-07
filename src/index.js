@@ -52,19 +52,47 @@ const logger = pino({
  * - UUIDs: 550e8400-e29b-41d4-a716-446655440000
  * - URL Paths: /doc/tutorial-setup-k2KatQyCbK -> k2KatQyCbK
  * - Full URLs: https://.../doc/title-k2KatQyCbK -> k2KatQyCbK
+ * - URL suffixes: /collection/slug-k2KatQyCbK/recent -> k2KatQyCbK
  */
-function extractId(input) {
+function extractId(input, baseUrl) {
   if (!input) return input;
-  // If it matches a UUID pattern, return it
+
+  // 1. Direct UUID check (fast path)
   const uuidRegex =
     /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
   if (uuidRegex.test(input)) return input;
 
-  // Otherwise, extract the last alphanumeric segment (handling slugs and URLs)
-  const parts = input.split(/[/ ]/).filter(Boolean);
-  const lastPart = parts[parts.length - 1];
-  const idMatch = lastPart.match(/([a-zA-Z0-9]+)$/);
-  return idMatch ? idMatch[1] : lastPart;
+  let url;
+  try {
+    // Only try to parse as URL if it looks like a path or full URL
+    // Slugs like "title-SHORTID" or "title::SHORTID" should go to fallback
+    if (input.startsWith("http") || input.startsWith("/") || input.includes("://")) {
+      url = input.startsWith("http") ? new URL(input) : new URL(input, baseUrl);
+    } else {
+      throw new Error("Not a URL");
+    }
+  } catch (e) {
+    // Fallback if URL parsing fails or is skipped (e.g. just a slug or simple ID)
+    const segments = input.split(/[ /]/).filter(Boolean);
+    const last = segments[segments.length - 1];
+    // Handle Outline slugs: TITLE-SHORTID or TITLE::SHORTID
+    return last.split(/[ -]|::/).pop();
+  }
+
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  const ignoreSuffixes = ["recent", "starred", "drafts", "deleted"];
+
+  // Filter out known view suffixes
+  const meaningfulParts = pathParts.filter((p) => !ignoreSuffixes.includes(p));
+
+  if (meaningfulParts.length === 0) return input;
+
+  // Most Outline IDs are in the last meaningful segment of the path
+  // e.g. /doc/title-SHORTID or /collection/title-SHORTID
+  const lastPart = meaningfulParts[meaningfulParts.length - 1];
+
+  // Handle slugs like "title-SHORTID" or legacy "title::SHORTID"
+  return lastPart.split(/[ -]|::/).pop();
 }
 
 // Server Configuration
@@ -99,10 +127,16 @@ const isUuid = (id) =>
 async function ensureResolved(outlineConfig) {
   if (CONFIG.isResolved) return;
 
+  const baseUrl = outlineConfig.url;
+
   // Initialize from environment
-  CONFIG.rawCollectionId = extractId(process.env.OUTLINE_DEFAULT_COLLECTION_ID);
+  CONFIG.rawCollectionId = extractId(
+    process.env.OUTLINE_DEFAULT_COLLECTION_ID,
+    baseUrl,
+  );
   CONFIG.rawParentDocumentId = extractId(
     process.env.OUTLINE_DEFAULT_PARENT_DOCUMENT_ID,
+    baseUrl,
   );
 
   // 1. Resolve Parent Document ID first (it contains the Collection ID)
@@ -197,20 +231,43 @@ if (!OUTLINE_URL || !OUTLINE_API_TOKEN) {
   process.exit(1);
 }
 
+function validateOneOf(args, fields, required = false) {
+  const provided = fields.filter(
+    (f) => args[f] !== undefined && args[f] !== null,
+  );
+  if (required && provided.length === 0) {
+    throw new Error(`Exactly one of ${fields.join(", ")} must be provided.`);
+  }
+  if (provided.length > 1) {
+    throw new Error(
+      `Only one of ${fields.join(", ")} can be provided, but got: ${provided.join(", ")}`,
+    );
+  }
+  return args[provided[0]];
+}
+
 // Tool Definitions with Defensive Schema Constraints
 export const getTools = (defaultCollectionId) => [
   {
     name: "documents-list",
-    description:
-      "Lists documents in the Outline wiki. Optionally filter by a specific collection.",
+    description: `Lists documents in the Outline wiki.
+MANDATE: DO NOT use 'curl' or manual HTTP commands for Outline. ALWAYS use this tool.
+- Use this to discover existing documents and their IDs.
+- You can provide a collection name directly via 'collectionName' (e.g., "Performance") and the server will resolve the ID for you.`,
     inputSchema: {
       type: "object",
       properties: {
         collectionId: {
           type: "string",
-          minLength: 1,
-          description:
-            "Collection identifier to list from. Accepts UUID, short ID, or full Outline URL.",
+          description: "Canonical UUID or Short ID of the collection.",
+        },
+        collectionName: {
+          type: "string",
+          description: "Display name of the collection.",
+        },
+        collectionUrl: {
+          type: "string",
+          description: "Full Outline URL of the collection.",
         },
       },
     },
@@ -218,24 +275,34 @@ export const getTools = (defaultCollectionId) => [
   {
     name: "documents-get",
     description:
-      "Retrieves a specific document by its ID. Returns the full content of the document.",
+      "Retrieves a specific document by its ID. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool. Returns the full content. Supports resolving by URL.",
     inputSchema: {
       type: "object",
       properties: {
-        id: {
+        documentId: {
           type: "string",
-          minLength: 1,
-          description:
-            "Document identifier to retrieve. Accepts UUID, short ID, or full Outline URL.",
+          description: "Canonical UUID or Short ID of the document.",
+        },
+        documentUrl: {
+          type: "string",
+          description: "Full Outline URL of the document.",
         },
       },
-      required: ["id"],
+      oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
+    },
+  },
+  {
+    name: "collections-list",
+    description: "Lists all collections in the Outline wiki. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool. Use this to find canonical collection IDs or verify collection names.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
   {
     name: "documents-search",
     description:
-      "Searches for documents by a query string. Returns a list of documents that match the query.",
+      "Searches for documents by a query string. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool. You can narrow the search to a specific collection by providing 'collectionName' (e.g., \"Performance\").",
     inputSchema: {
       type: "object",
       properties: {
@@ -245,6 +312,18 @@ export const getTools = (defaultCollectionId) => [
           maxLength: 500,
           description: "The search query string.",
         },
+        collectionId: {
+          type: "string",
+          description: "Optional canonical UUID or Short ID to narrow the search.",
+        },
+        collectionName: {
+          type: "string",
+          description: "Optional display name to narrow the search.",
+        },
+        collectionUrl: {
+          type: "string",
+          description: "Optional full Outline URL to narrow the search.",
+        },
       },
       required: ["query"],
     },
@@ -252,17 +331,22 @@ export const getTools = (defaultCollectionId) => [
   {
     name: "documents-patch",
     description: `Surgically updates an existing document using search and replace.
-- Use this for small updates to existing documents to preserve the original formatting.
+MANDATE: DO NOT use 'curl' for Outline. Always use this tool for updates.
+- PREFERRED for all edits to existing documents to preserve original formatting and structure.
+- The 'search' string MUST be unique within the document. If it appears multiple times, the patch will fail.
+- TIP: Include surrounding context (like headers or preceding sentences) in 'search' to ensure uniqueness.
 - Only the search regions are modified; the rest of the document remains byte-for-byte identical.
-- Supports the same attachment handling as 'documents-upsert'.`,
+- Supports same attachment handling as 'documents-upsert'.`,
     inputSchema: {
       type: "object",
       properties: {
-        id: {
+        documentId: {
           type: "string",
-          minLength: 1,
-          description:
-            "Document identifier to update. Accepts UUID, short ID, or full Outline URL.",
+          description: "Canonical UUID or Short ID of the document.",
+        },
+        documentUrl: {
+          type: "string",
+          description: "Full Outline URL of the document.",
         },
         patches: {
           type: "array",
@@ -271,7 +355,8 @@ export const getTools = (defaultCollectionId) => [
             properties: {
               search: {
                 type: "string",
-                description: "The exact literal text to find.",
+                description:
+                  "The exact literal text to find. MUST be unique in the document.",
               },
               replace: {
                 type: "string",
@@ -320,27 +405,30 @@ export const getTools = (defaultCollectionId) => [
             ],
           },
           description:
-            "Optional list of attachments to upload and associate with the document. Use {{attachment:filename}} in the text to embed them.",
+            "Optional list of attachments to upload. Use standard Markdown links ![alt](filename) or {{attachment:filename}} in the 'replace' text to embed them.",
         },
       },
-      required: ["id", "patches"],
+      oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
+      required: ["patches"],
     },
   },
   {
     name: "documents-upsert",
-    description: `Creates or updates documents. 
+    description: `Creates or updates documents. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool.
 IMPORTANT: This server is sandboxed. 
+- Use this primarily for CREATING new documents. For updates, prefer 'documents-patch'.
 - All NEW documents will be created in collection: ${defaultCollectionId}.
-- You can provide a 'parentDocumentId' to nest new documents, but the parent MUST be in the same collection.
-- UPDATES are only permitted for existing documents already within this collection.
 - New documents are automatically formatted with Prettier for consistency.`,
     inputSchema: {
       type: "object",
       properties: {
-        id: {
+        documentId: {
           type: "string",
-          description:
-            "Existing document ID to update. Accepts UUID, short ID, or full Outline URL. Omit to create a new document.",
+          description: "Existing document UUID or Short ID to update.",
+        },
+        documentUrl: {
+          type: "string",
+          description: "Existing document URL to update.",
         },
         title: {
           type: "string",
@@ -352,7 +440,8 @@ IMPORTANT: This server is sandboxed.
           type: "string",
           minLength: 1,
           maxLength: 100000,
-          description: "Markdown content to store in the document (max 100KB).",
+          description:
+            "Markdown content. Embed attachments using standard links ![alt](filename) or {{attachment:filename}} placeholders.",
         },
         publish: {
           type: "boolean",
@@ -364,11 +453,14 @@ IMPORTANT: This server is sandboxed.
           description:
             "Optional template UUID to apply when creating a document.",
         },
-        parentDocumentId: {
+        parentId: {
           type: "string",
-          minLength: 1,
           description:
-            "Optional parent document ID for nesting. Accepts UUID, short ID, or full Outline URL. Must be in the sandbox collection.",
+            "Optional parent document UUID or Short ID for nesting. Must be in the sandbox collection.",
+        },
+        parentUrl: {
+          type: "string",
+          description: "Optional parent document URL for nesting.",
         },
         attachments: {
           type: "array",
@@ -408,7 +500,7 @@ IMPORTANT: This server is sandboxed.
             ],
           },
           description:
-            "Optional list of attachments to upload and associate with the document. Use {{attachment:filename}} in the text to embed them.",
+            "Optional list of attachments to upload and associate with the document.",
         },
       },
       required: ["title", "text"],
@@ -555,6 +647,64 @@ function validateMarkdown(text, logger) {
   }
 }
 
+/**
+ * Resolves a collection identifier (URL, ID, or Name) to a canonical UUID.
+ * Handles ambiguity by returning an error string with suggestions.
+ */
+async function resolveCollectionId(input, outlineConfig) {
+  if (!input) return null;
+
+  const { url: baseUrl } = outlineConfig;
+
+  // 1. Try direct extraction (UUID, URL, or Slug)
+  const directId = extractId(input, baseUrl);
+
+  // If it's a UUID, we're done
+  const uuidRegex =
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+  if (uuidRegex.test(directId)) return directId;
+
+  // 2. Fetch all collections to check for name matches
+  const result = await callOutline("/api/collections.list", {}, outlineConfig);
+  const collections = result.data || [];
+
+  // 3. Try to find a collection by exact short ID/slug match first (canonical)
+  const idMatch = collections.find(
+    (c) => c.id === directId || c.urlId === directId,
+  );
+  if (idMatch) return idMatch.id;
+
+  // 4. Try case-insensitive name match
+  const searchName = input.toLowerCase().trim();
+  const nameMatches = collections.filter(
+    (c) => c.name.toLowerCase().trim() === searchName,
+  );
+
+  if (nameMatches.length === 1) {
+    return nameMatches[0].id;
+  }
+
+  if (nameMatches.length > 1) {
+    const suggestions = nameMatches
+      .map(
+        (c) =>
+          `- "${c.name}" [ID: ${c.id}]${c.description ? `: ${c.description}` : ""}`,
+      )
+      .join("\n");
+    throw new Error(
+      `Ambiguous collection name '${input}'. Found ${nameMatches.length} matches. Please use a specific collectionId from this list:\n${suggestions}`,
+    );
+  }
+
+  // 5. Final fallback: If it wasn't a name, and we didn't find an ID match,
+  // return the directId if it looks like a valid Outline identifier segment
+  if (directId && directId.length >= 10) {
+    return directId;
+  }
+
+  throw new Error(`Collection '${input}' not found.`);
+}
+
 // Handler logic extracted for testing
 export async function handleCallTool(request, config) {
   const { name, arguments: args } = request.params;
@@ -570,10 +720,16 @@ export async function handleCallTool(request, config) {
 
   switch (name) {
     case "documents-list": {
+      const input = validateOneOf(args, [
+        "collectionId",
+        "collectionName",
+        "collectionUrl",
+      ]);
+      const colId = await resolveCollectionId(input, outlineConfig);
       const result = await callOutline(
         "/api/documents.list",
         {
-          collectionId: extractId(args?.collectionId),
+          ...(colId ? { collectionId: colId } : {}),
         },
         outlineConfig,
       );
@@ -583,10 +739,15 @@ export async function handleCallTool(request, config) {
     }
 
     case "documents-get": {
+      const input = validateOneOf(
+        args,
+        ["documentId", "documentUrl"],
+        true, // required
+      );
       const result = await callOutline(
         "/api/documents.info",
         {
-          id: extractId(args.id),
+          id: extractId(input, outlineUrl),
         },
         outlineConfig,
       );
@@ -595,11 +756,29 @@ export async function handleCallTool(request, config) {
       };
     }
 
+    case "collections-list": {
+      const result = await callOutline(
+        "/api/collections.list",
+        {},
+        outlineConfig,
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
     case "documents-search": {
+      const input = validateOneOf(args, [
+        "collectionId",
+        "collectionName",
+        "collectionUrl",
+      ]);
+      const colId = await resolveCollectionId(input, outlineConfig);
       const result = await callOutline(
         "/api/documents.search",
         {
           query: args.query,
+          ...(colId ? { collectionId: colId } : {}),
         },
         outlineConfig,
       );
@@ -609,7 +788,12 @@ export async function handleCallTool(request, config) {
     }
 
     case "documents-patch": {
-      const argId = extractId(args.id);
+      const input = validateOneOf(
+        args,
+        ["documentId", "documentUrl"],
+        true, // required
+      );
+      const argId = extractId(input, outlineUrl);
       if (!defaultCollectionId) {
         throw new Error(
           "Server missing sandbox configuration. Please set OUTLINE_DEFAULT_COLLECTION_ID or OUTLINE_DEFAULT_PARENT_DOCUMENT_ID in your environment.",
@@ -656,7 +840,12 @@ export async function handleCallTool(request, config) {
 
       // Re-use attachment logic
       const result = await handleAttachmentUpsert(
-        { ...args, text, title: docInfo.data.title, id: argId },
+        {
+          ...args,
+          text,
+          title: docInfo.data.title,
+          id: docInfo.data.id, // Use UUID for efficiency
+        },
         outlineConfig,
         defaultCollectionId,
         false, // Not creating
@@ -668,7 +857,8 @@ export async function handleCallTool(request, config) {
     }
 
     case "documents-upsert": {
-      const argId = extractId(args.id);
+      const inputId = validateOneOf(args, ["documentId", "documentUrl"]);
+      const argId = extractId(inputId, outlineUrl);
       const creating = !argId;
 
       if (!defaultCollectionId) {
@@ -678,8 +868,11 @@ export async function handleCallTool(request, config) {
       }
 
       // Enforce Sandboxing: Verify document or parent belongs to the default collection
+      let resolvedId = argId;
       if (creating) {
-        const parentId = extractId(args.parentDocumentId) || defaultParentDocumentId;
+        const inputParent = validateOneOf(args, ["parentId", "parentUrl"]);
+        const parentId =
+          extractId(inputParent, outlineUrl) || defaultParentDocumentId;
         if (parentId) {
           const parentInfo = await callOutline(
             "/api/documents.info",
@@ -707,10 +900,11 @@ export async function handleCallTool(request, config) {
             `Document ${argId} is outside the sandbox collection and cannot be updated.`,
           );
         }
+        resolvedId = docInfo.data.id; // Use UUID for efficiency
       }
 
       const result = await handleAttachmentUpsert(
-        args,
+        { ...args, id: resolvedId },
         outlineConfig,
         defaultCollectionId,
         creating,
@@ -736,7 +930,7 @@ async function handleAttachmentUpsert(
   creating,
 ) {
   const { logger } = outlineConfig;
-  const argId = extractId(args.id);
+  const argId = extractId(args.id, outlineConfig.url);
   const defaultParentDocumentId = CONFIG.resolvedParentDocumentId;
   const endpoint = creating
     ? "/api/documents.create"
@@ -899,10 +1093,13 @@ async function handleAttachmentUpsert(
 
           const attachmentRedirectUrl = `/api/attachments.redirect?id=${id}`;
 
-          // 1. Replace explicit placeholders: {{attachment:filename}} -> id
-          text = text.replaceAll(`{{attachment:${name}}}`, id);
+          // 1. Replace explicit placeholders: {{attachment:filename}} -> redirect URL
+          text = text.replaceAll(`{{attachment:${name}}}`, attachmentRedirectUrl);
           if (attachment.path) {
-            text = text.replaceAll(`{{attachment:${attachment.path}}}`, id);
+            text = text.replaceAll(
+              `{{attachment:${attachment.path}}}`,
+              attachmentRedirectUrl,
+            );
           }
 
           text = replaceMarkdownTargets(
@@ -935,8 +1132,9 @@ async function handleAttachmentUpsert(
 
     if (creating) {
       payload.collectionId = defaultCollectionId;
+      const inputParent = validateOneOf(args, ["parentId", "parentUrl"]);
       const parentId =
-        extractId(args.parentDocumentId) || defaultParentDocumentId;
+        extractId(inputParent, outlineConfig.url) || defaultParentDocumentId;
       if (parentId) {
         payload.parentDocumentId = parentId;
       }
