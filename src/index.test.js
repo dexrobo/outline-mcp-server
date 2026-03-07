@@ -9,13 +9,15 @@ jest.unstable_mockModule("axios", () => ({
 }));
 
 // Mock fs
+const globalFsMock = {
+  existsSync: jest.fn(),
+  statSync: jest.fn(),
+  createReadStream: jest.fn(),
+  realpathSync: jest.fn(),
+};
 jest.unstable_mockModule("fs", () => ({
-  default: {
-    existsSync: jest.fn(),
-    statSync: jest.fn(),
-    createReadStream: jest.fn(),
-    realpathSync: jest.fn(),
-  },
+  default: globalFsMock,
+  ...globalFsMock,
 }));
 
 // Mock process.exit
@@ -36,6 +38,7 @@ const config = {
 
 describe("Outline MCP Server Tools - Attachments", () => {
   let handleCallTool;
+  let getTools;
   let axiosMock;
   let fsMock;
   let mod;
@@ -43,6 +46,7 @@ describe("Outline MCP Server Tools - Attachments", () => {
   beforeAll(async () => {
     mod = await import("./index.js");
     handleCallTool = mod.handleCallTool;
+    getTools = mod.getTools;
     const { default: axios } = await import("axios");
     axiosMock = axios;
     const { default: fs } = await import("fs");
@@ -178,7 +182,7 @@ describe("Outline MCP Server Tools - Attachments", () => {
     expect(axiosMock.post).toHaveBeenCalledWith(
       expect.stringContaining("/api/documents.create"),
       expect.objectContaining({
-        text: 'See video: ![Alt](/api/attachments.redirect?id=attach-video "My Video") or [Download](  /api/attachments.redirect?id=attach-video  )',
+        text: 'See video: ![Alt](/api/attachments.redirect?id=attach-video "My Video") or [Download](/api/attachments.redirect?id=attach-video)\n',
       }),
       expect.any(Object),
     );
@@ -222,42 +226,422 @@ describe("Outline MCP Server Tools - Attachments", () => {
       "missing required 'attachment.id' or 'uploadUrl'",
     );
   });
-});
 
-import fc from "fast-check";
+  it("should use signed multipart upload fields as provided by Outline", async () => {
+    axiosMock.post
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: {
+            uploadUrl: "https://s3.test/upload-post",
+            form: { key: "uploads/test.png", "x-amz-meta-tag": ["a", "b"] },
+            attachment: { id: "attach-form" },
+          },
+        },
+      })
+      .mockResolvedValueOnce({ status: 204 })
+      .mockResolvedValueOnce({ data: { data: { id: "doc-form", title: "Form Doc" } } });
 
-describe("Markdown Replacement Fuzzing", () => {
-  let replaceInMarkdown;
-
-  beforeAll(async () => {
-    const escapeRegExp = (string) =>
-      string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-    replaceInMarkdown = (text, target, replacement, isImage) => {
-      const prefix = isImage ? "!" : "";
-      const regex = new RegExp(
-        `(${prefix}\\[.*?\\])\\((\\s*)${escapeRegExp(target)}(\\s+.*?)?(\\s*)\\)`,
-        "g",
-      );
-      return text.replace(regex, `$1($2${replacement}$3$4)`);
+    const request = {
+      params: {
+        name: "documents-upsert",
+        arguments: {
+          title: "Form Doc",
+          text: "![img](image.png)",
+          attachments: [
+            {
+              name: "image.png",
+              contentType: "image/png",
+              content: Buffer.from("img").toString("base64"),
+            },
+          ],
+        },
+      },
     };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      "https://s3.test/upload-post",
+      expect.any(Object),
+      expect.objectContaining({
+        timeout: expect.any(Number),
+      }),
+    );
   });
 
-  it("should never crash and always replace valid placeholders", () => {
-    fc.assert(
-      fc.property(
-        fc.string(),
-        fc.string({ minLength: 1 }),
-        fc.uuid(),
-        (text, filename, id) => {
-          try {
-            const result = replaceInMarkdown(text, filename, id, true);
-            return typeof result === "string";
-          } catch {
-            return false;
-          }
+  it("should include signed upload response details when upload fails", async () => {
+    axiosMock.post
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: {
+            uploadUrl: "https://s3.test/upload",
+            attachment: { id: "attach-err" },
+          },
         },
-      ),
+      });
+    axiosMock.put.mockRejectedValueOnce({
+      message: "Request failed with status code 403",
+      response: { status: 403, data: "SignatureDoesNotMatch" },
+    });
+
+    const request = {
+      params: {
+        name: "documents-upsert",
+        arguments: {
+          title: "Broken Upload",
+          text: "x",
+          attachments: [
+            {
+              name: "image.png",
+              contentType: "image/png",
+              content: Buffer.from("test content").toString("base64"),
+            },
+          ],
+        },
+      },
+    };
+
+    await expect(handleCallTool(request, config)).rejects.toThrow(
+      /Signed upload failed: status=403 \| SignatureDoesNotMatch/,
+    );
+  });
+
+  it("should support link destinations wrapped in angle brackets", async () => {
+    fsMock.existsSync.mockReturnValue(true);
+    fsMock.statSync.mockReturnValue({ size: 3 });
+    fsMock.createReadStream.mockReturnValue({ pipe: jest.fn() });
+
+    axiosMock.post
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: {
+            uploadUrl: "https://s3.test/upload",
+            attachment: { id: "attach-angle" },
+          },
+        },
+      });
+    axiosMock.put.mockResolvedValueOnce({ status: 200 });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "doc-angle", title: "Angle Doc" } },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "documents-upsert",
+          arguments: {
+            title: "Angle Doc",
+            text: '![Alt](<image.png> "Img") and [Download](</tmp/image.png>)',
+            attachments: [
+              {
+                name: "image.png",
+                path: "/tmp/image.png",
+              },
+            ],
+          },
+        },
+      },
+      config,
+    );
+
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.create"),
+      expect.objectContaining({
+        text: '![Alt](/api/attachments.redirect?id=attach-angle "Img") and [Download](/api/attachments.redirect?id=attach-angle)\n',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("should advertise short IDs/URLs in tool schemas and enforce attachment oneOf", () => {
+    const tools = getTools("sandbox-collection");
+    const listTool = tools.find((tool) => tool.name === "documents-list");
+    const getTool = tools.find((tool) => tool.name === "documents-get");
+    const upsertTool = tools.find((tool) => tool.name === "documents-upsert");
+
+    expect(listTool.inputSchema.properties.collectionId.format).toBeUndefined();
+    expect(listTool.inputSchema.properties.collectionId.description).toContain(
+      "short ID",
+    );
+
+    expect(getTool.inputSchema.properties.id.description).toContain("short ID");
+    expect(upsertTool.inputSchema.properties.parentDocumentId.format).toBeUndefined();
+    expect(upsertTool.inputSchema.properties.attachments.items.oneOf).toHaveLength(2);
+  });
+
+  it("should handle documents-patch with surgical search and replace", async () => {
+    // 1. Mock parent info (for resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.info (to get original text)
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "Existing Doc",
+          text: "Original content. Keep this.",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+
+    // 3. Mock documents.update
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "doc-123", title: "Existing Doc" } },
+    });
+
+    const request = {
+      params: {
+        name: "documents-patch",
+        arguments: {
+          id: "doc-123",
+          patches: [
+            {
+              search: "Original content.",
+              replace: "Patched content!",
+            },
+          ],
+        },
+      },
+    };
+
+    const result = await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.update"),
+      expect.objectContaining({
+        text: "Patched content! Keep this.",
+      }),
+      expect.any(Object),
+    );
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("should fail documents-patch if search string is not found", async () => {
+    // 1. Mock parent info
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.info
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          text: "I am here.",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+
+    const request = {
+      params: {
+        name: "documents-patch",
+        arguments: {
+          id: "doc-123",
+          patches: [{ search: "Not here", replace: "X" }],
+        },
+      },
+    };
+
+    await expect(handleCallTool(request, config)).rejects.toThrow(
+      "Patch failed: Could not find exact search string",
+    );
+  });
+
+  it("should fail documents-patch if search string is ambiguous", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          text: "Double Double",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+
+    const request = {
+      params: {
+        name: "documents-patch",
+        arguments: {
+          id: "doc-123",
+          patches: [{ search: "Double", replace: "X" }],
+        },
+      },
+    };
+
+    await expect(handleCallTool(request, config)).rejects.toThrow(
+      "Search string is ambiguous and matches 2 times",
+    );
+  });
+
+  it("should handle special $ characters in documents-patch replacement", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "Price Doc",
+          text: "The price is PLACEHOLDER.",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "doc-123", title: "Price Doc" } },
+    });
+
+    const request = {
+      params: {
+        name: "documents-patch",
+        arguments: {
+          id: "doc-123",
+          patches: [{ search: "PLACEHOLDER", replace: "$100" }],
+        },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.update"),
+      expect.objectContaining({
+        text: "The price is $100.",
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("should normalize newlines in documents-patch", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-123",
+          title: "NL Doc",
+          text: "Line 1\r\nLine 2",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "doc-123", title: "NL Doc" } },
+    });
+
+    const request = {
+      params: {
+        name: "documents-patch",
+        arguments: {
+          id: "doc-123",
+          patches: [{ search: "Line 1\nLine 2", replace: "Fixed" }],
+        },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.update"),
+      expect.objectContaining({
+        text: "Fixed",
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("should format new documents with Prettier in documents-upsert", async () => {
+    // 1. Mock parent info (resolution + sandbox check)
+    axiosMock.post
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      });
+
+    // 2. Mock document create
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "doc-new", title: "New Doc" } },
+    });
+
+    const messyMarkdown = "  # Heading\n\n- item 1\n - item 2";
+    const request = {
+      params: {
+        name: "documents-upsert",
+        arguments: {
+          title: "New Doc",
+          text: messyMarkdown,
+        },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    // Verify axios call text (formatted by Prettier)
+    const call = axiosMock.post.mock.calls.find((c) =>
+      c[0].endsWith("/api/documents.create"),
+    );
+    const sentText = call[1].text;
+
+    expect(sentText).toContain("# Heading");
+    expect(sentText).toContain("- item 1\n- item 2"); // Normalized indentation
+    expect(sentText).not.toBe(messyMarkdown);
+  });
+
+  it("should fail validation if attachment placeholders remain", async () => {
+    // 1. Mock parent info
+    axiosMock.post
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+      });
+
+    // 2. Mock document create
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "doc-fail", title: "Fail Doc" } },
+    });
+
+    const request = {
+      params: {
+        name: "documents-upsert",
+        arguments: {
+          title: "Fail Doc",
+          text: "Dangling {{attachment:missing.png}}",
+        },
+      },
+    };
+
+    await expect(handleCallTool(request, config)).rejects.toThrow(
+      "Found unreplaced attachment placeholder",
     );
   });
 });
