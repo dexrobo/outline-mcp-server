@@ -22,9 +22,13 @@ The server looks for environment variables in the following order:
 |----------|-------------|
 | `OUTLINE_URL` | Base URL of your Outline instance (e.g., `https://wiki.example.com`) |
 | `OUTLINE_API_TOKEN` | Your Outline API token (requires write access for upsert) |
-| `OUTLINE_DEFAULT_COLLECTION_ID` | UUID of the collection where new documents will be created |
-| `OUTLINE_DEFAULT_PARENT_DOCUMENT_ID` | (Optional) UUID of a parent document to nest new documents under by default |
+| `OUTLINE_DEFAULT_COLLECTION_ID` | UUID, URL, or Short ID of the target collection for new documents. Optional if Parent ID is set. |
+| `OUTLINE_DEFAULT_PARENT_DOCUMENT_ID` | UUID, URL, or Short ID of the default parent document. The target collection is automatically inferred from this document if not explicitly set. |
 | `LOG_LEVEL` | Logging level (`info`, `debug`, `error`). Defaults to `info`. |
+
+### URL & Short ID Support
+
+All ID fields—including environment variables and tool arguments—accept full Outline URLs (e.g., `https://.../doc/title-k2KatQyCbK`), short IDs (`k2KatQyCbK`), or standard UUIDs. The server automatically extracts and resolves these to the correct internal identifiers.
 
 ## Quick Start (Recommended)
 
@@ -130,6 +134,11 @@ The discovery URL will be `http://localhost:3000/mcp`.
 - `documents-get`: Retrieve full document content by ID.
 - `documents-search`: Search for documents by query string.
 - `documents-upsert`: Create or update documents (strictly sandboxed).
+    - **Attachments:** Supports uploading images, PDFs, videos, and other files.
+        - **Streaming:** Large files are streamed directly from local paths (use the `path` field).
+        - **Base64:** Small files can be provided as base64 content.
+        - **Markdown Integration:** You can link to attachments using standard Markdown syntax like `![Alt text](local/path/to/image.png)` or `[Download](filename.pdf)`. The server will automatically replace these with the correct attachment IDs.
+        - **Explicit Placeholder:** Alternatively, use `{{attachment:filename}}` to get just the attachment ID.
 
 ## Development
 
@@ -140,6 +149,20 @@ If you want to contribute or modify the server:
 3. Run linting: `npm run lint`
 4. Run formatting: `npm run format`
 5. Run tests: `npm test`
+
+### Local Development & Testing
+
+You can test the MCP server's end-to-end flow locally (including the standard MCP handshake) without a full MCP host using the provided smoke test utility:
+
+```bash
+# Verify the MCP protocol and tool routing locally
+npm run test:mcp
+
+# CI-safe wrapper with an outer hard timeout (45s)
+npm run test:mcp:ci
+```
+
+This utility handles the standard JSON-RPC handshake, lists the available tools, and performs a test call to `documents-list` to ensure everything is wired correctly.
 
 ## Security Notice
 
