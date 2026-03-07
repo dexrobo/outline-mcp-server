@@ -294,10 +294,8 @@ function validateOneOf(args, fields, required = false) {
 export const getTools = (defaultCollectionId) => [
   {
     name: "documents-list",
-    description: `Lists documents in the Outline wiki.
-MANDATE: DO NOT use 'curl' or manual HTTP commands for Outline. ALWAYS use this tool.
-- Use this to discover existing documents and their IDs.
-- You can provide a collection name directly via 'collectionName' (e.g., "Performance") and the server will resolve the ID for you.`,
+    description:
+      "List documents in Outline. Never use curl or manual HTTP for Outline; use this tool. Accepts collection ID, URL, or name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -313,13 +311,19 @@ MANDATE: DO NOT use 'curl' or manual HTTP commands for Outline. ALWAYS use this 
           type: "string",
           description: "Full Outline URL of the collection.",
         },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description: "Optional max number of documents to return.",
+        },
       },
     },
   },
   {
     name: "documents-get",
     description:
-      "Retrieves a specific document by its ID. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool. Returns the full content. Supports resolving by URL.",
+      "Get one Outline document. Never use curl or manual HTTP for Outline; use this tool. Returns metadata by default; set includeText=true only when full body is needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -331,13 +335,18 @@ MANDATE: DO NOT use 'curl' or manual HTTP commands for Outline. ALWAYS use this 
           type: "string",
           description: "Full Outline URL of the document.",
         },
+        includeText: {
+          type: "boolean",
+          description: "Include full document text. Defaults to false to save tokens.",
+        },
       },
       oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
     },
   },
   {
     name: "collections-list",
-    description: "Lists all collections in the Outline wiki. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool. Use this to find canonical collection IDs or verify collection names.",
+    description:
+      "List Outline collections. Never use curl or manual HTTP for Outline; use this tool to find canonical collection IDs or verify names.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -346,7 +355,7 @@ MANDATE: DO NOT use 'curl' or manual HTTP commands for Outline. ALWAYS use this 
   {
     name: "documents-search",
     description:
-      "Searches for documents by a query string. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool. You can narrow the search to a specific collection by providing 'collectionName' (e.g., \"Performance\").",
+      "Search Outline documents by query. Never use curl or manual HTTP for Outline; use this tool. Optional collection filter accepts ID, URL, or name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -368,19 +377,25 @@ MANDATE: DO NOT use 'curl' or manual HTTP commands for Outline. ALWAYS use this 
           type: "string",
           description: "Optional full Outline URL to narrow the search.",
         },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description: "Optional max number of documents to return.",
+        },
       },
       required: ["query"],
     },
   },
   {
     name: "documents-patch",
-    description: `Surgically updates an existing document using search and replace.
-MANDATE: DO NOT use 'curl' for Outline. Always use this tool for updates.
-- PREFERRED for all edits to existing documents to preserve original formatting and structure.
-- The 'search' string MUST be unique within the document. If it appears multiple times, the patch will fail.
-- TIP: Include surrounding context (like headers or preceding sentences) in 'search' to ensure uniqueness.
-- Only the search regions are modified; the rest of the document remains byte-for-byte identical.
-- Supports same attachment handling as 'documents-upsert'.`,
+    description: `Surgically update an existing Outline document with search and replace.
+Never use curl or manual HTTP for Outline; use this tool.
+- PREFERRED for edits to existing documents. Do not switch to documents-upsert unless you truly need full-document replacement.
+- The 'search' string MUST be unique within the document or the patch will fail.
+- TIP: Include surrounding context such as a nearby header or sentence to make 'search' unique.
+- Only matched regions change; the rest of the document stays byte-for-byte identical.
+- Supports the same attachment handling as documents-upsert.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -418,23 +433,19 @@ MANDATE: DO NOT use 'curl' for Outline. Always use this tool for updates.
             properties: {
               path: {
                 type: "string",
-                description:
-                  "Local file path to the attachment (preferred for large files like videos).",
+                description: "Local file path; preferred for large files.",
               },
               name: {
                 type: "string",
-                description:
-                  "The name of the file (e.g., video.mp4). Defaults to basename of path.",
+                description: "Filename; defaults to basename(path).",
               },
               contentType: {
                 type: "string",
-                description:
-                  "The MIME type of the file. Will be guessed from path if omitted.",
+                description: "MIME type; guessed from path if omitted.",
               },
               content: {
                 type: "string",
-                description:
-                  "The base64 encoded content of the file (alternative to path).",
+                description: "Base64 file content; use with name when not using path.",
               },
             },
             oneOf: [
@@ -449,7 +460,7 @@ MANDATE: DO NOT use 'curl' for Outline. Always use this tool for updates.
             ],
           },
           description:
-            "Optional list of attachments to upload. Use standard Markdown links ![alt](filename) or {{attachment:filename}} in the 'replace' text to embed them.",
+            "Optional attachments. Reference them in replace text with Markdown links or {{attachment:filename}}.",
         },
       },
       oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
@@ -458,11 +469,9 @@ MANDATE: DO NOT use 'curl' for Outline. Always use this tool for updates.
   },
   {
     name: "documents-upsert",
-    description: `Creates or updates documents. MANDATE: DO NOT use 'curl' for Outline. ALWAYS use this tool.
-IMPORTANT: This server is sandboxed. 
-- Use this primarily for CREATING new documents. For updates, prefer 'documents-patch'.
-- All NEW documents will be created in collection: ${defaultCollectionId || "the configured sandbox collection"}.
-- New documents are automatically formatted with Prettier for consistency.`,
+    description: `Create or update Outline documents. Never use curl or manual HTTP for Outline; use this tool.
+Prefer this for creating documents; prefer documents-patch for edits.
+New documents are created in collection: ${defaultCollectionId || "the configured sandbox collection"}.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -513,23 +522,19 @@ IMPORTANT: This server is sandboxed.
             properties: {
               path: {
                 type: "string",
-                description:
-                  "Local file path to the attachment (preferred for large files like videos).",
+                description: "Local file path; preferred for large files.",
               },
               name: {
                 type: "string",
-                description:
-                  "The name of the file (e.g., video.mp4). Defaults to basename of path.",
+                description: "Filename; defaults to basename(path).",
               },
               contentType: {
                 type: "string",
-                description:
-                  "The MIME type of the file. Will be guessed from path if omitted.",
+                description: "MIME type; guessed from path if omitted.",
               },
               content: {
                 type: "string",
-                description:
-                  "The base64 encoded content of the file (alternative to path).",
+                description: "Base64 file content; use with name when not using path.",
               },
             },
             oneOf: [
@@ -544,7 +549,7 @@ IMPORTANT: This server is sandboxed.
             ],
           },
           description:
-            "Optional list of attachments to upload and associate with the document.",
+            "Optional attachments to upload and associate with the document.",
         },
       },
       required: ["title", "text"],
@@ -691,6 +696,123 @@ function validateMarkdown(text, logger) {
   }
 }
 
+function collectNodeText(node) {
+  if (!node) return "";
+
+  if (node.type === "text" || node.type === "inlineCode") {
+    return node.value || "";
+  }
+
+  if (node.type === "image") {
+    return node.alt || "";
+  }
+
+  if (!Array.isArray(node.children)) return "";
+
+  return node.children.map((child) => collectNodeText(child)).join(" ");
+}
+
+function trimExcerpt(text, maxLength) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+
+  const slice = normalized.slice(0, maxLength + 1);
+  const sentenceCut = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
+  if (sentenceCut >= Math.floor(maxLength * 0.6)) {
+    return slice.slice(0, sentenceCut + 1).trim();
+  }
+
+  const wordCut = slice.lastIndexOf(" ");
+  if (wordCut >= Math.floor(maxLength * 0.6)) {
+    return slice.slice(0, wordCut).trim();
+  }
+
+  return normalized.slice(0, maxLength).trim();
+}
+
+function extractExcerptFromMarkdown(text, maxLength = 280) {
+  if (typeof text !== "string" || text.trim().length === 0) return null;
+
+  try {
+    const tree = unified().use(remarkParse).parse(text);
+    const candidates = [];
+
+    for (const node of tree.children || []) {
+      if (!node || ["heading", "thematicBreak", "code", "html"].includes(node.type)) {
+        continue;
+      }
+
+      if (node.type === "paragraph" || node.type === "blockquote") {
+        candidates.push(node);
+        continue;
+      }
+
+      if (node.type === "list") {
+        for (const item of node.children || []) {
+          for (const child of item.children || []) {
+            candidates.push(child);
+          }
+        }
+      }
+    }
+
+    for (const candidate of candidates) {
+      const plainText = collectNodeText(candidate);
+      if (plainText.trim().length === 0) continue;
+      return trimExcerpt(plainText, maxLength);
+    }
+  } catch {
+    // Fall back to a raw prefix if markdown parsing fails.
+  }
+
+  return trimExcerpt(text, maxLength);
+}
+
+function summarizeDocument(document, { includeText = false, excerptLength } = {}) {
+  if (!document) return null;
+
+  const summary = {
+    id: document.id,
+    title: document.title,
+    url: document.url,
+    urlId: document.urlId,
+    collectionId: document.collectionId,
+    parentDocumentId: document.parentDocumentId,
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+    publishedAt: document.publishedAt,
+  };
+
+  if (includeText) {
+    summary.text = document.text;
+  } else if (excerptLength && typeof document.text === "string" && document.text.length > 0) {
+    summary.excerpt = extractExcerptFromMarkdown(document.text, excerptLength);
+  }
+
+  return Object.fromEntries(
+    Object.entries(summary).filter(([, value]) => value !== undefined),
+  );
+}
+
+function summarizeCollection(collection) {
+  if (!collection) return null;
+
+  return Object.fromEntries(
+    Object.entries({
+      id: collection.id,
+      name: collection.name,
+      urlId: collection.urlId,
+      description: collection.description,
+    }).filter(([, value]) => value !== undefined),
+  );
+}
+
+function compactToolResult(payload) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+  };
+}
+
 /**
  * Resolves a collection identifier (URL, ID, or Name) to a canonical UUID.
  * Handles ambiguity by returning an error string with suggestions.
@@ -786,12 +908,13 @@ export async function handleCallTool(request, config) {
         "/api/documents.list",
         {
           ...(colId ? { collectionId: colId } : {}),
+          ...(args.limit ? { limit: args.limit } : {}),
         },
         outlineConfig,
       );
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return compactToolResult({
+        documents: (result.data || []).map((document) => summarizeDocument(document)),
+      });
     }
 
     case "documents-get": {
@@ -807,9 +930,12 @@ export async function handleCallTool(request, config) {
         },
         outlineConfig,
       );
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return compactToolResult({
+        document: summarizeDocument(result.data, {
+          includeText: args.includeText === true,
+          excerptLength: args.includeText === true ? undefined : 280,
+        }),
+      });
     }
 
     case "collections-list": {
@@ -818,9 +944,11 @@ export async function handleCallTool(request, config) {
         {},
         outlineConfig,
       );
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return compactToolResult({
+        collections: (result.data || []).map((collection) =>
+          summarizeCollection(collection),
+        ),
+      });
     }
 
     case "documents-search": {
@@ -835,12 +963,13 @@ export async function handleCallTool(request, config) {
         {
           query: args.query,
           ...(colId ? { collectionId: colId } : {}),
+          ...(args.limit ? { limit: args.limit } : {}),
         },
         outlineConfig,
       );
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return compactToolResult({
+        documents: (result.data || []).map((document) => summarizeDocument(document)),
+      });
     }
 
     case "documents-patch": {
@@ -920,9 +1049,7 @@ export async function handleCallTool(request, config) {
         false, // Not creating
       );
 
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return compactToolResult(result);
     }
 
     case "documents-upsert": {
@@ -979,9 +1106,7 @@ export async function handleCallTool(request, config) {
         creating,
       );
 
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return compactToolResult(result);
     }
 
     default:
@@ -1223,11 +1348,11 @@ async function handleAttachmentUpsert(
   }
 
   // Include attachment IDs in the result for the user's reference
-  if (attachmentResults.length > 0) {
-    result.attachments = attachmentResults;
-  }
-
-  return result;
+  return {
+    operation: creating ? "create" : "update",
+    document: summarizeDocument(result.data),
+    ...(attachmentResults.length > 0 ? { attachments: attachmentResults } : {}),
+  };
 }
 
 // MCP Server Initialization
