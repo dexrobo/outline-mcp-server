@@ -16,6 +16,10 @@ import os from "os";
 import fs from "fs";
 import mime from "mime-types";
 import FormData from "form-data";
+import prettier from "prettier";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import { visit } from "unist-util-visit";
 
 // Load environment variables
 if (process.env.NODE_ENV !== "test") {
@@ -204,8 +208,9 @@ export const getTools = (defaultCollectionId) => [
       properties: {
         collectionId: {
           type: "string",
-          format: "uuid",
-          description: "The UUID of the collection to list documents from.",
+          minLength: 1,
+          description:
+            "Collection identifier to list from. Accepts UUID, short ID, or full Outline URL.",
         },
       },
     },
@@ -220,7 +225,8 @@ export const getTools = (defaultCollectionId) => [
         id: {
           type: "string",
           minLength: 1,
-          description: "The ID (UUID) of the document to retrieve.",
+          description:
+            "Document identifier to retrieve. Accepts UUID, short ID, or full Outline URL.",
         },
       },
       required: ["id"],
@@ -244,47 +250,37 @@ export const getTools = (defaultCollectionId) => [
     },
   },
   {
-    name: "documents-upsert",
-    description: `Creates or updates documents. 
-IMPORTANT: This server is sandboxed. 
-- All NEW documents will be created in collection: ${defaultCollectionId}.
-- You can provide a 'parentDocumentId' to nest new documents, but the parent MUST be in the same collection.
-- UPDATES are only permitted for existing documents already within this collection.`,
+    name: "documents-patch",
+    description: `Surgically updates an existing document using search and replace.
+- Use this for small updates to existing documents to preserve the original formatting.
+- Only the search regions are modified; the rest of the document remains byte-for-byte identical.
+- Supports the same attachment handling as 'documents-upsert'.`,
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description:
-            "Existing document ID (UUID) to update. Omit to create a new document.",
-        },
-        title: {
-          type: "string",
           minLength: 1,
-          maxLength: 255,
-          description: "Title for the document (max 255 chars).",
-        },
-        text: {
-          type: "string",
-          minLength: 1,
-          maxLength: 100000,
-          description: "Markdown content to store in the document (max 100KB).",
-        },
-        publish: {
-          type: "boolean",
-          description: "Whether to publish the document (default true).",
-        },
-        templateId: {
-          type: "string",
-          format: "uuid",
           description:
-            "Optional template UUID to apply when creating a document.",
+            "Document identifier to update. Accepts UUID, short ID, or full Outline URL.",
         },
-        parentDocumentId: {
-          type: "string",
-          format: "uuid",
-          description:
-            "Optional parent document UUID for nesting. Must be in the sandbox collection.",
+        patches: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              search: {
+                type: "string",
+                description: "The exact literal text to find.",
+              },
+              replace: {
+                type: "string",
+                description: "The text to replace it with.",
+              },
+            },
+            required: ["search", "replace"],
+          },
+          description: "List of search/replace patches to apply.",
         },
         attachments: {
           type: "array",
@@ -312,6 +308,104 @@ IMPORTANT: This server is sandboxed.
                   "The base64 encoded content of the file (alternative to path).",
               },
             },
+            oneOf: [
+              {
+                required: ["path"],
+                not: { required: ["content"] },
+              },
+              {
+                required: ["content", "name"],
+                not: { required: ["path"] },
+              },
+            ],
+          },
+          description:
+            "Optional list of attachments to upload and associate with the document. Use {{attachment:filename}} in the text to embed them.",
+        },
+      },
+      required: ["id", "patches"],
+    },
+  },
+  {
+    name: "documents-upsert",
+    description: `Creates or updates documents. 
+IMPORTANT: This server is sandboxed. 
+- All NEW documents will be created in collection: ${defaultCollectionId}.
+- You can provide a 'parentDocumentId' to nest new documents, but the parent MUST be in the same collection.
+- UPDATES are only permitted for existing documents already within this collection.
+- New documents are automatically formatted with Prettier for consistency.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description:
+            "Existing document ID to update. Accepts UUID, short ID, or full Outline URL. Omit to create a new document.",
+        },
+        title: {
+          type: "string",
+          minLength: 1,
+          maxLength: 255,
+          description: "Title for the document (max 255 chars).",
+        },
+        text: {
+          type: "string",
+          minLength: 1,
+          maxLength: 100000,
+          description: "Markdown content to store in the document (max 100KB).",
+        },
+        publish: {
+          type: "boolean",
+          description: "Whether to publish the document (default true).",
+        },
+        templateId: {
+          type: "string",
+          format: "uuid",
+          description:
+            "Optional template UUID to apply when creating a document.",
+        },
+        parentDocumentId: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Optional parent document ID for nesting. Accepts UUID, short ID, or full Outline URL. Must be in the sandbox collection.",
+        },
+        attachments: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: {
+                type: "string",
+                description:
+                  "Local file path to the attachment (preferred for large files like videos).",
+              },
+              name: {
+                type: "string",
+                description:
+                  "The name of the file (e.g., video.mp4). Defaults to basename of path.",
+              },
+              contentType: {
+                type: "string",
+                description:
+                  "The MIME type of the file. Will be guessed from path if omitted.",
+              },
+              content: {
+                type: "string",
+                description:
+                  "The base64 encoded content of the file (alternative to path).",
+              },
+            },
+            oneOf: [
+              {
+                required: ["path"],
+                not: { required: ["content"] },
+              },
+              {
+                required: ["content", "name"],
+                not: { required: ["path"] },
+              },
+            ],
           },
           description:
             "Optional list of attachments to upload and associate with the document. Use {{attachment:filename}} in the text to embed them.",
@@ -342,6 +436,122 @@ export async function callOutline(endpoint, payload = {}, config = {}) {
       logger.error({ status, message, endpoint }, "Outline API call failed.");
     }
     throw new Error(`Outline API Error: ${message}`, { cause: error });
+  }
+}
+
+function parseUploadError(error) {
+  const status = error.response?.status;
+  let detail = error.response?.data;
+  if (Buffer.isBuffer(detail)) detail = detail.toString("utf8");
+  if (typeof detail === "object" && detail !== null) {
+    try {
+      detail = JSON.stringify(detail);
+    } catch {
+      detail = String(detail);
+    }
+  }
+  const detailText =
+    typeof detail === "string" && detail.trim().length > 0
+      ? detail.trim().slice(0, 500)
+      : null;
+
+  return [status ? `status=${status}` : null, detailText, error.message]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function appendPresignedFormFields(formData, formFields) {
+  for (const [key, value] of Object.entries(formFields)) {
+    if (value === undefined || value === null) {
+      throw new Error(`Presigned form field '${key}' was empty.`);
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item === undefined || item === null || typeof item === "object") {
+          throw new Error(
+            `Presigned form field '${key}' contained an unsupported value.`,
+          );
+        }
+        formData.append(key, String(item));
+      }
+      continue;
+    }
+
+    if (typeof value === "object") {
+      throw new Error(
+        `Presigned form field '${key}' contained an unsupported object value.`,
+      );
+    }
+
+    formData.append(key, String(value));
+  }
+}
+
+function replaceMarkdownTargets(text, targets, replacement) {
+  const targetSet = new Set((targets || []).filter(Boolean));
+  if (targetSet.size === 0) return text;
+
+  // Use remark-parse to find exactly where the links and images are
+  const tree = unified().use(remarkParse).parse(text);
+  const patches = [];
+
+  visit(tree, ["link", "image"], (node) => {
+    if (targetSet.has(node.url)) {
+      // We have a match! We only want to replace the URL inside this specific node.
+      // node.position contains start/end offsets for the whole [label](url)
+      const start = node.position.start.offset;
+      const end = node.position.end.offset;
+      const originalNodeText = text.slice(start, end);
+
+      // Now we find the URL's position within THIS specific node text.
+      const searchUrl = node.url;
+      let urlIdx = originalNodeText.indexOf(searchUrl);
+
+      if (urlIdx !== -1) {
+        patches.push({
+          start: start + urlIdx,
+          end: start + urlIdx + searchUrl.length,
+          replacement,
+        });
+      }
+    }
+  });
+
+  // Apply patches in reverse to maintain offsets
+  patches.sort((a, b) => b.start - a.start);
+  let out = text;
+  for (const patch of patches) {
+    out = out.slice(0, patch.start) + patch.replacement + out.slice(patch.end);
+  }
+
+  return out;
+}
+
+/**
+ * Validates Markdown structure to prevent common LLM mistakes like unclosed blocks
+ * or dangling placeholders.
+ */
+function validateMarkdown(text, logger) {
+  try {
+    const tree = unified().use(remarkParse).parse(text);
+
+    // 1. Check for dangling attachment placeholders
+    // (This catches LLM typos like {{attachment:mispelled.png}})
+    const placeholderRegex = /{{attachment:[^}]+}}/g;
+    const matches = text.match(placeholderRegex);
+    if (matches && matches.length > 0) {
+      throw new Error(
+        `Validation failed: Found unreplaced attachment placeholder(s): ${matches.join(
+          ", ",
+        )}. This usually means the filename didn't match an uploaded attachment.`,
+      );
+    }
+  } catch (error) {
+    if (logger?.warn) {
+      logger.warn({ error: error.message }, "Markdown validation failed.");
+    }
+    throw error;
   }
 }
 
@@ -398,12 +608,68 @@ export async function handleCallTool(request, config) {
       };
     }
 
+    case "documents-patch": {
+      const argId = extractId(args.id);
+      if (!defaultCollectionId) {
+        throw new Error(
+          "Server missing sandbox configuration. Please set OUTLINE_DEFAULT_COLLECTION_ID or OUTLINE_DEFAULT_PARENT_DOCUMENT_ID in your environment.",
+        );
+      }
+
+      // Fetch the original document
+      const docInfo = await callOutline(
+        "/api/documents.info",
+        {
+          id: argId,
+        },
+        outlineConfig,
+      );
+
+      // Enforce Sandboxing
+      if (docInfo.data.collectionId !== defaultCollectionId) {
+        throw new Error(
+          `Document ${argId} is outside the sandbox collection and cannot be updated.`,
+        );
+      }
+
+      let text = docInfo.data.text.replace(/\r\n/g, "\n");
+
+      // Apply patches surgically
+      for (const patch of args.patches) {
+        const search = patch.search.replace(/\r\n/g, "\n");
+        const replace = patch.replace.replace(/\r\n/g, "\n");
+
+        const occurrences = text.split(search).length - 1;
+        if (occurrences === 0) {
+          throw new Error(
+            `Patch failed: Could not find exact search string in document: "${search.slice(0, 50)}..."`,
+          );
+        }
+        if (occurrences > 1) {
+          throw new Error(
+            `Patch failed: Search string is ambiguous and matches ${occurrences} times. Please provide more surrounding context to make it unique: "${search.slice(0, 50)}..."`,
+          );
+        }
+        // Using a function for replacement prevents '$' special character bugs
+        text = text.replace(search, () => replace);
+      }
+
+      // Re-use attachment logic
+      const result = await handleAttachmentUpsert(
+        { ...args, text, title: docInfo.data.title, id: argId },
+        outlineConfig,
+        defaultCollectionId,
+        false, // Not creating
+      );
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
     case "documents-upsert": {
       const argId = extractId(args.id);
       const creating = !argId;
-      const endpoint = creating
-        ? "/api/documents.create"
-        : "/api/documents.update";
 
       if (!defaultCollectionId) {
         throw new Error(
@@ -443,220 +709,12 @@ export async function handleCallTool(request, config) {
         }
       }
 
-      let text = args.text;
-      const attachmentResults = [];
-      const uploadedAttachmentIds = [];
-
-      const cleanupUploadedAttachments = async () => {
-        if (!ATTACHMENT_CLEANUP_ON_FAILURE || uploadedAttachmentIds.length === 0) {
-          return;
-        }
-
-        for (const attachmentId of uploadedAttachmentIds) {
-          try {
-            await callOutline(
-              "/api/attachments.delete",
-              { id: attachmentId },
-              outlineConfig,
-            );
-          } catch (cleanupError) {
-            if (logger?.warn) {
-              logger.warn(
-                { attachmentId, error: cleanupError.message },
-                "Failed to cleanup uploaded attachment after documents-upsert failure.",
-              );
-            }
-          }
-        }
-      };
-
-      let result;
-
-      try {
-        // Handle attachments
-        if (args.attachments && args.attachments.length > 0) {
-          for (const attachment of args.attachments) {
-            try {
-              let bufferOrStream;
-              let size;
-              let contentType = attachment.contentType;
-              let name = attachment.name;
-
-              if (attachment.path) {
-                const fullPath = path.resolve(attachment.path);
-                if (!fs.existsSync(fullPath)) {
-                  throw new Error(`File not found: ${fullPath}`);
-                }
-                const stat = fs.statSync(fullPath);
-                size = stat.size;
-                bufferOrStream = fs.createReadStream(fullPath);
-                if (!name) name = path.basename(fullPath);
-                if (!contentType)
-                  contentType =
-                    mime.lookup(fullPath) || "application/octet-stream";
-              } else if (attachment.content) {
-                const buffer = Buffer.from(attachment.content, "base64");
-                size = buffer.length;
-                bufferOrStream = buffer;
-                if (!name)
-                  throw new Error("Name is required when using base64 content.");
-                if (!contentType) contentType = "application/octet-stream";
-              } else {
-                throw new Error(
-                  "Either 'path' or 'content' must be provided for each attachment.",
-                );
-              }
-
-              const createResponse = await callOutline(
-                "/api/attachments.create",
-                {
-                  name: name,
-                  contentType: contentType,
-                  size: size,
-                  documentId: argId || undefined,
-                },
-                outlineConfig,
-              );
-
-              if (logger) {
-                logger.debug({ createResponse }, "Outline attachments.create response");
-              }
-
-              const { uploadUrl, form, attachment: attachmentInfo } = createResponse.data || {};
-              const id = attachmentInfo?.id;
-
-              if (!id || !uploadUrl) {
-                throw new Error(
-                  "Outline attachments.create response missing required 'attachment.id' or 'uploadUrl'.",
-                );
-              }
-
-              // Step 2: Upload to signed URL
-              if (form) {
-                // Multi-part upload (common for S3 backends)
-                const formData = new FormData();
-                for (const [key, value] of Object.entries(form)) {
-                  formData.append(key, value);
-                }
-                formData.append("file", bufferOrStream, {
-                  filename: name,
-                  contentType: contentType,
-                  knownLength: size,
-                });
-
-                await axios.post(uploadUrl, formData, {
-                  headers: {
-                    ...formData.getHeaders(),
-                  },
-                  maxBodyLength: Infinity,
-                  maxContentLength: Infinity,
-                  timeout: ATTACHMENT_UPLOAD_TIMEOUT_MS,
-                });
-              } else {
-                // Direct PUT upload (common for local/GCS backends)
-                await axios.put(uploadUrl, bufferOrStream, {
-                  headers: {
-                    "Content-Type": contentType,
-                    "Content-Length": size,
-                  },
-                  maxBodyLength: Infinity,
-                  maxContentLength: Infinity,
-                  timeout: ATTACHMENT_UPLOAD_TIMEOUT_MS,
-                });
-              }
-
-              uploadedAttachmentIds.push(id);
-              attachmentResults.push({ name: name, id });
-
-              // Helper to escape regex special characters
-              const escapeRegExp = (string) =>
-                string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-              const attachmentRedirectUrl = `/api/attachments.redirect?id=${id}`;
-
-              // 1. Replace explicit placeholders: {{attachment:filename}} -> id
-              text = text.replaceAll(`{{attachment:${name}}}`, id);
-              if (attachment.path) {
-                text = text.replaceAll(`{{attachment:${attachment.path}}}`, id);
-              }
-
-              /**
-               * Regex Explanation:
-               * (!\[.*?\])        - Group 1: The alt text part like ![image] or [link]
-               * \(                - Opening parenthesis
-               * \s*               - Optional leading whitespace
-               * (FILENAME|PATH)   - The reference we want to replace
-               * (\s+.*?)?         - Group 2: Optional title/caption starting with whitespace (e.g., " "title"")
-               * \s*               - Optional trailing whitespace
-               * \)                - Closing parenthesis
-               */
-              const replaceInMarkdown = (target, replacement, isImage) => {
-                const prefix = isImage ? "!" : "";
-                const regex = new RegExp(
-                  `(${prefix}\\[.*?\\])\\((\\s*)${escapeRegExp(
-                    target,
-                  )}(\\s+.*?)?(\\s*)\\)`,
-                  "g",
-                );
-                return text.replace(regex, `$1($2${replacement}$3$4)`);
-              };
-
-              // Replace in Images (using redirect URL)
-              text = replaceInMarkdown(name, attachmentRedirectUrl, true);
-              if (attachment.path) {
-                text = replaceInMarkdown(attachment.path, attachmentRedirectUrl, true);
-              }
-
-              // Replace in Links (using redirect URL)
-              text = replaceInMarkdown(name, attachmentRedirectUrl, false);
-              if (attachment.path) {
-                text = replaceInMarkdown(attachment.path, attachmentRedirectUrl, false);
-              }
-
-            } catch (error) {
-              logger.error(
-                {
-                  attachment: attachment.name || attachment.path,
-                  error: error.message,
-                },
-                "Failed to upload attachment",
-              );
-              throw new Error(
-                `Failed to upload attachment '${
-                  attachment.name || attachment.path
-                }': ${error.message}`,
-              );
-            }
-          }
-        }
-
-        const payload = {
-          title: args.title,
-          text: text,
-          publish: args.publish ?? true,
-        };
-
-        if (creating) {
-          payload.collectionId = defaultCollectionId;
-          const parentId = extractId(args.parentDocumentId) || defaultParentDocumentId;
-          if (parentId) {
-            payload.parentDocumentId = parentId;
-          }
-          if (args.templateId) payload.templateId = args.templateId;
-        } else {
-          payload.id = argId;
-        }
-
-        result = await callOutline(endpoint, payload, outlineConfig);
-      } catch (error) {
-        await cleanupUploadedAttachments();
-        throw error;
-      }
-
-      // Include attachment IDs in the result for the user's reference
-      if (attachmentResults.length > 0) {
-        result.attachments = attachmentResults;
-      }
+      const result = await handleAttachmentUpsert(
+        args,
+        outlineConfig,
+        defaultCollectionId,
+        creating,
+      );
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -666,6 +724,242 @@ export async function handleCallTool(request, config) {
     default:
       throw new Error(`Tool '${name}' not found.`);
   }
+}
+
+/**
+ * Common logic for handling attachments and document upsertion.
+ */
+async function handleAttachmentUpsert(
+  args,
+  outlineConfig,
+  defaultCollectionId,
+  creating,
+) {
+  const { logger } = outlineConfig;
+  const argId = extractId(args.id);
+  const defaultParentDocumentId = CONFIG.resolvedParentDocumentId;
+  const endpoint = creating
+    ? "/api/documents.create"
+    : "/api/documents.update";
+
+  let text = args.text;
+
+  // Format new documents with Prettier for consistency
+  if (creating) {
+    try {
+      text = await prettier.format(text, {
+        parser: "markdown",
+        proseWrap: "preserve",
+        printWidth: 120,
+      });
+    } catch (prettierError) {
+      if (logger?.warn) {
+        logger.warn(
+          { error: prettierError.message },
+          "Prettier formatting failed for new document. Proceeding with original text.",
+        );
+      }
+    }
+  }
+
+  const attachmentResults = [];
+  const uploadedAttachmentIds = [];
+
+  const cleanupUploadedAttachments = async () => {
+    if (!ATTACHMENT_CLEANUP_ON_FAILURE || uploadedAttachmentIds.length === 0) {
+      return;
+    }
+
+    for (const attachmentId of uploadedAttachmentIds) {
+      try {
+        await callOutline(
+          "/api/attachments.delete",
+          { id: attachmentId },
+          outlineConfig,
+        );
+      } catch (cleanupError) {
+        if (logger?.warn) {
+          logger.warn(
+            { attachmentId, error: cleanupError.message },
+            "Failed to cleanup uploaded attachment after documents-upsert failure.",
+          );
+        }
+      }
+    }
+  };
+
+  let result;
+
+  try {
+    // Handle attachments
+    if (args.attachments && args.attachments.length > 0) {
+      for (const attachment of args.attachments) {
+        try {
+          let bufferOrStream;
+          let size;
+          let contentType = attachment.contentType;
+          let name = attachment.name;
+
+          if (attachment.path) {
+            const fullPath = path.resolve(attachment.path);
+            if (!fs.existsSync(fullPath)) {
+              throw new Error(`File not found: ${fullPath}`);
+            }
+            const stat = fs.statSync(fullPath);
+            size = stat.size;
+            bufferOrStream = fs.createReadStream(fullPath);
+            if (!name) name = path.basename(fullPath);
+            if (!contentType)
+              contentType =
+                mime.lookup(fullPath) || "application/octet-stream";
+          } else if (attachment.content) {
+            const buffer = Buffer.from(attachment.content, "base64");
+            size = buffer.length;
+            bufferOrStream = buffer;
+            if (!name)
+              throw new Error("Name is required when using base64 content.");
+            if (!contentType) contentType = "application/octet-stream";
+          } else {
+            throw new Error(
+              "Either 'path' or 'content' must be provided for each attachment.",
+            );
+          }
+
+          const createResponse = await callOutline(
+            "/api/attachments.create",
+            {
+              name: name,
+              contentType: contentType,
+              size: size,
+              documentId: argId || undefined,
+            },
+            outlineConfig,
+          );
+
+          if (logger) {
+            logger.debug({ createResponse }, "Outline attachments.create response");
+          }
+
+          const { uploadUrl, form, attachment: attachmentInfo } =
+            createResponse.data || {};
+          const id = attachmentInfo?.id;
+
+          if (!id || !uploadUrl) {
+            throw new Error(
+              "Outline attachments.create response missing required 'attachment.id' or 'uploadUrl'.",
+            );
+          }
+
+          // Step 2: Upload to signed URL
+          if (form) {
+            // Multi-part upload (common for S3 backends)
+            const formData = new FormData();
+            appendPresignedFormFields(formData, form);
+            formData.append("file", bufferOrStream, {
+              filename: name,
+              contentType: contentType,
+              knownLength: size,
+            });
+
+            try {
+              await axios.post(uploadUrl, formData, {
+                headers: {
+                  ...formData.getHeaders(),
+                },
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
+                timeout: ATTACHMENT_UPLOAD_TIMEOUT_MS,
+              });
+            } catch (uploadError) {
+              throw new Error(
+                `Signed upload failed: ${parseUploadError(uploadError)}`,
+              );
+            }
+          } else {
+            // Direct PUT upload (common for local/GCS backends)
+            try {
+              await axios.put(uploadUrl, bufferOrStream, {
+                headers: {
+                  "Content-Type": contentType,
+                  "Content-Length": size,
+                },
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
+                timeout: ATTACHMENT_UPLOAD_TIMEOUT_MS,
+              });
+            } catch (uploadError) {
+              throw new Error(
+                `Signed upload failed: ${parseUploadError(uploadError)}`,
+              );
+            }
+          }
+
+          uploadedAttachmentIds.push(id);
+          attachmentResults.push({ name: name, id });
+
+          const attachmentRedirectUrl = `/api/attachments.redirect?id=${id}`;
+
+          // 1. Replace explicit placeholders: {{attachment:filename}} -> id
+          text = text.replaceAll(`{{attachment:${name}}}`, id);
+          if (attachment.path) {
+            text = text.replaceAll(`{{attachment:${attachment.path}}}`, id);
+          }
+
+          text = replaceMarkdownTargets(
+            text,
+            [name, attachment.path],
+            attachmentRedirectUrl,
+          );
+        } catch (error) {
+          logger.error(
+            {
+              attachment: attachment.name || attachment.path,
+              error: error.message,
+            },
+            "Failed to upload attachment",
+          );
+          throw new Error(
+            `Failed to upload attachment '${
+              attachment.name || attachment.path
+            }': ${error.message}`,
+          );
+        }
+      }
+    }
+
+    const payload = {
+      title: args.title,
+      text: text,
+      publish: args.publish ?? true,
+    };
+
+    if (creating) {
+      payload.collectionId = defaultCollectionId;
+      const parentId =
+        extractId(args.parentDocumentId) || defaultParentDocumentId;
+      if (parentId) {
+        payload.parentDocumentId = parentId;
+      }
+      if (args.templateId) payload.templateId = args.templateId;
+    } else {
+      payload.id = argId;
+    }
+
+    result = await callOutline(endpoint, payload, outlineConfig);
+  } catch (error) {
+    await cleanupUploadedAttachments();
+    throw error;
+  }
+
+  // Final Safety Validation
+  validateMarkdown(text, logger);
+
+  // Include attachment IDs in the result for the user's reference
+  if (attachmentResults.length > 0) {
+    result.attachments = attachmentResults;
+  }
+
+  return result;
 }
 
 // MCP Server Initialization
