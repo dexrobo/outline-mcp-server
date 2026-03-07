@@ -118,6 +118,14 @@ describe("Outline MCP Server Tools - Attachments", () => {
       expect.any(Object),
     );
 
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.create"),
+      expect.objectContaining({
+        text: expect.stringContaining("/api/attachments.redirect?id=attach-123"),
+      }),
+      expect.any(Object),
+    );
+
     expect(axiosMock.put).toHaveBeenCalledWith(
       "https://s3.test/upload",
       expect.any(Buffer),
@@ -371,19 +379,20 @@ describe("Outline MCP Server Tools - Attachments", () => {
     );
   });
 
-  it("should advertise short IDs/URLs in tool schemas and enforce attachment oneOf", () => {
+  it("should advertise explicit identifier fields in tool schemas", () => {
     const tools = getTools("sandbox-collection");
     const listTool = tools.find((tool) => tool.name === "documents-list");
     const getTool = tools.find((tool) => tool.name === "documents-get");
     const upsertTool = tools.find((tool) => tool.name === "documents-upsert");
 
-    expect(listTool.inputSchema.properties.collectionId.format).toBeUndefined();
-    expect(listTool.inputSchema.properties.collectionId.description).toContain(
-      "short ID",
-    );
+    expect(listTool.inputSchema.properties.collectionName).toBeDefined();
+    expect(listTool.inputSchema.properties.collectionUrl).toBeDefined();
 
-    expect(getTool.inputSchema.properties.id.description).toContain("short ID");
-    expect(upsertTool.inputSchema.properties.parentDocumentId.format).toBeUndefined();
+    expect(getTool.inputSchema.properties.documentId).toBeDefined();
+    expect(getTool.inputSchema.properties.documentUrl).toBeDefined();
+
+    expect(upsertTool.inputSchema.properties.parentId).toBeDefined();
+    expect(upsertTool.inputSchema.properties.parentUrl).toBeDefined();
     expect(upsertTool.inputSchema.properties.attachments.items.oneOf).toHaveLength(2);
   });
 
@@ -414,7 +423,7 @@ describe("Outline MCP Server Tools - Attachments", () => {
       params: {
         name: "documents-patch",
         arguments: {
-          id: "doc-123",
+          documentId: "doc-123",
           patches: [
             {
               search: "Original content.",
@@ -458,8 +467,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
       params: {
         name: "documents-patch",
         arguments: {
-          id: "doc-123",
-          patches: [{ search: "Not here", replace: "X" }],
+          documentId: "doc-123",
+          patches: [{ search:
+ "Not here", replace: "X" }],
         },
       },
     };
@@ -487,8 +497,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
       params: {
         name: "documents-patch",
         arguments: {
-          id: "doc-123",
-          patches: [{ search: "Double", replace: "X" }],
+          documentId: "doc-123",
+          patches: [{ search:
+ "Double", replace: "X" }],
         },
       },
     };
@@ -520,8 +531,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
       params: {
         name: "documents-patch",
         arguments: {
-          id: "doc-123",
-          patches: [{ search: "PLACEHOLDER", replace: "$100" }],
+          documentId: "doc-123",
+          patches: [{ search:
+ "PLACEHOLDER", replace: "$100" }],
         },
       },
     };
@@ -559,8 +571,9 @@ describe("Outline MCP Server Tools - Attachments", () => {
       params: {
         name: "documents-patch",
         arguments: {
-          id: "doc-123",
-          patches: [{ search: "Line 1\nLine 2", replace: "Fixed" }],
+          documentId: "doc-123",
+          patches: [{ search:
+ "Line 1\nLine 2", replace: "Fixed" }],
         },
       },
     };
@@ -642,6 +655,288 @@ describe("Outline MCP Server Tools - Attachments", () => {
 
     await expect(handleCallTool(request, config)).rejects.toThrow(
       "Found unreplaced attachment placeholder",
+    );
+  });
+
+  it("should handle various identifier formats in documents-get", async () => {
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    const formats = [
+      {
+        input: "https://test.outline.com/doc/slug-ID123",
+        expected: "ID123",
+      },
+      {
+        input: "/doc/slug-ID456",
+        expected: "ID456",
+      },
+      {
+        input: "https://test.outline.com/collection/slug-COL123/recent",
+        expected: "COL123",
+      },
+      {
+        input: "my-title::ID789",
+        expected: "ID789",
+      },
+    ];
+
+    for (const { input, expected } of formats) {
+      axiosMock.post.mockResolvedValueOnce({
+        data: { data: { id: expected, title: "Test" } },
+      });
+
+      await handleCallTool(
+        {
+          params: {
+            name: "documents-get",
+            arguments: { documentId: input },
+          },
+        },
+        config,
+      );
+
+      expect(axiosMock.post).toHaveBeenLastCalledWith(
+        expect.stringContaining("/api/documents.info"),
+        expect.objectContaining({ id: expected }),
+        expect.any(Object),
+      );
+    }
+  });
+
+  it("should resolve collection by name in documents-list", async () => {
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock collections.list (for resolveCollectionId)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [{ id: "unique-uuid", name: "Unique Name" }] },
+    });
+
+    // 3. Mock documents.list
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    const request = {
+      params: {
+        name: "documents-list",
+        arguments: { collectionName: "Unique Name" },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/documents.list"),
+      expect.objectContaining({ collectionId: "unique-uuid" }),
+      expect.any(Object),
+    );
+  });
+
+  it("should handle documents-list WITHOUT collectionId", async () => {
+    // 1. Mock parent info
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.list
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    const request = {
+      params: {
+        name: "documents-list",
+        arguments: {},
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/documents.list"),
+      {},
+      expect.any(Object),
+    );
+  });
+
+  it("should fail documents-search if collection name is ambiguous", async () => {
+    // 1. Mock parent info
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock collections.list with duplicates
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: [
+          { id: "id-1", name: "Ambiguous", description: "Desc 1" },
+          { id: "id-2", name: "Ambiguous", description: "Desc 2" },
+        ],
+      },
+    });
+
+    const request = {
+      params: {
+        name: "documents-search",
+        arguments: { query: "latency", collectionName: "Ambiguous" },
+      },
+    };
+
+    await expect(handleCallTool(request, config)).rejects.toThrow(
+      /Ambiguous collection name 'Ambiguous'.*id-1.*Desc 1.*id-2.*Desc 2/s,
+    );
+  });
+
+  it("should handle collections-list", async () => {
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock collections.list
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [{ id: "col-1", name: "Performance" }] },
+    });
+
+
+    const request = {
+      params: {
+        name: "collections-list",
+        arguments: {},
+      },
+    };
+
+    const result = await handleCallTool(request, config);
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/collections.list"),
+      {},
+      expect.any(Object),
+    );
+    expect(result.content[0].text).toContain("Performance");
+  });
+
+  it("should handle documents-search with optional collectionId", async () => {
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock collections.list (for resolveCollectionId)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [{ id: "ID123", name: "Performance", urlId: "Performance-ID123" }] },
+    });
+
+    // 3. Mock documents.search
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    const request = {
+      params: {
+        name: "documents-search",
+        arguments: {
+          query: "latency",
+          collectionUrl: "Performance-ID123",
+        },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/documents.search"),
+      expect.objectContaining({
+        query: "latency",
+        collectionId: "ID123",
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("should handle documents-search WITHOUT collectionId (global search)", async () => {
+    // 1. Mock parent info
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    const request = {
+      params: {
+        name: "documents-search",
+        arguments: {
+          query: "latency",
+        },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/documents.search"),
+      { query: "latency" },
+      expect.any(Object),
+    );
+  });
+
+  it("should use resolved UUID for the update call in documents-patch", async () => {
+    const shortId = "short-123";
+    const canonicalUuid = "406fba79-639a-44a7-9aeb-02be400d0287";
+
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.info (to get original text and UUID)
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: canonicalUuid,
+          title: "Existing Doc",
+          text: "Original content.",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+
+    // 3. Mock documents.update
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: canonicalUuid, title: "Existing Doc" } },
+    });
+
+    const request = {
+      params: {
+        name: "documents-patch",
+        arguments: {
+          documentId: shortId,
+          patches: [{ search: "Original", replace: "Updated" }],
+        },
+      },
+    };
+
+    await handleCallTool(request, config);
+
+    // Verify documents.info called with extracted ID (123 from short-123)
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.info"),
+      expect.objectContaining({ id: "123" }),
+      expect.any(Object),
+    );
+
+    // Verify documents.update called with canonicalUuid
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.update"),
+      expect.objectContaining({ id: canonicalUuid }),
+      expect.any(Object),
     );
   });
 });
