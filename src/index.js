@@ -50,46 +50,6 @@ const DEFAULT_COLLECTION_ID = process.env.OUTLINE_DEFAULT_COLLECTION_ID;
 const DEFAULT_PARENT_DOCUMENT_ID =
   process.env.OUTLINE_DEFAULT_PARENT_DOCUMENT_ID;
 
-// Resolved collection ID (lazily populated)
-let resolvedCollectionId = null;
-
-// Helper to resolve collection slug to UUID if needed
-async function getResolvedCollectionId() {
-  if (resolvedCollectionId) return resolvedCollectionId;
-  if (!DEFAULT_COLLECTION_ID) return null;
-
-  // Simple UUID check
-  const isUUID =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      DEFAULT_COLLECTION_ID,
-    );
-
-  if (isUUID) {
-    resolvedCollectionId = DEFAULT_COLLECTION_ID;
-    return resolvedCollectionId;
-  }
-
-  // If it's a slug, resolve it via the API
-  try {
-    const result = await callOutline("/api/collections.info", {
-      id: DEFAULT_COLLECTION_ID,
-    });
-    resolvedCollectionId = result.data.id;
-    logger.info(
-      { slug: DEFAULT_COLLECTION_ID, uuid: resolvedCollectionId },
-      "Resolved sandbox collection slug to UUID.",
-    );
-    return resolvedCollectionId;
-  } catch (error) {
-    logger.warn(
-      { slug: DEFAULT_COLLECTION_ID, error: error.message },
-      "Failed to resolve collection slug to UUID. Sandbox comparisons may fail.",
-    );
-    // Fallback to original value
-    return DEFAULT_COLLECTION_ID;
-  }
-}
-
 // Validate Credentials
 if (!OUTLINE_URL || !OUTLINE_API_TOKEN) {
   logger.error("Missing OUTLINE_URL or OUTLINE_API_TOKEN in environment.");
@@ -271,8 +231,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
 
-        const sandboxId = await getResolvedCollectionId();
-
         // Enforce Sandboxing: Verify document or parent belongs to the default collection
         if (creating) {
           const parentId = args.parentDocumentId || DEFAULT_PARENT_DOCUMENT_ID;
@@ -280,9 +238,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const parentInfo = await callOutline("/api/documents.info", {
               id: parentId,
             });
-            if (parentInfo.data.collectionId !== sandboxId) {
+            if (parentInfo.data.collectionId !== DEFAULT_COLLECTION_ID) {
               throw new Error(
-                `Parent document ${parentId} is outside the sandbox collection (sandbox: ${sandboxId}).`,
+                `Parent document ${parentId} is outside the sandbox collection.`,
               );
             }
           }
@@ -290,9 +248,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const docInfo = await callOutline("/api/documents.info", {
             id: args.id,
           });
-          if (docInfo.data.collectionId !== sandboxId) {
+          if (docInfo.data.collectionId !== DEFAULT_COLLECTION_ID) {
             throw new Error(
-              `Document ${args.id} is outside the sandbox collection (sandbox: ${sandboxId}) and cannot be updated.`,
+              `Document ${args.id} is outside the sandbox collection and cannot be updated.`,
             );
           }
         }
@@ -304,7 +262,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         if (creating) {
-          payload.collectionId = sandboxId;
+          payload.collectionId = DEFAULT_COLLECTION_ID;
           const parentId = args.parentDocumentId || DEFAULT_PARENT_DOCUMENT_ID;
           if (parentId) {
             payload.parentDocumentId = parentId;
@@ -365,6 +323,4 @@ program
     }
   });
 
-if (process.env.NODE_ENV !== "test") {
-  program.parse();
-}
+program.parse();

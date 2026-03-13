@@ -4,11 +4,10 @@ This is a Model Context Protocol (MCP) server that provides access to an [Outlin
 
 ## Features
 
-- **Search and read your Outline knowledge base:** Agents can search by query, browse documents by collection, and fetch full document contents from Outline for grounded answers and follow-up work.
-- **Create new pages in the right place by default:** New documents are always created inside a configured Outline collection, with optional nesting under a default parent document.
-- **Update existing pages without crossing collection boundaries:** When editing an existing Outline doc, the server verifies that it belongs to the approved collection before allowing the write.
-- **Work with Outline's document model:** The upsert flow supports standard Outline page fields like `title`, Markdown `text`, `publish`, `templateId`, and `parentDocumentId`.
-- **Use one Outline workspace config everywhere:** The server supports a local `.env` file or a shared `~/.outline-mcp.env`, which is handy if you want multiple MCP clients pointing at the same wiki.
+- **Standardized:** Built with the official `@modelcontextprotocol/sdk`.
+- **Multiple Transports:** Supports both `stdio` (local) and `SSE` (remote/Express) transports.
+- **Secure:** Redacts sensitive tokens from logs and ensures credentials are never hardcoded.
+- **Sandboxed Creation:** Forces new documents into a specific collection and parent page to prevent clutter.
 
 ## Configuration
 
