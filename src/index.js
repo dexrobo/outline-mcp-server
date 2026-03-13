@@ -460,7 +460,7 @@ Never use curl or manual HTTP for Outline; use this tool.
             ],
           },
           description:
-            "Optional attachments. Reference them in replace text with Markdown links or {{attachment:filename}}.",
+            "Optional attachments. You MUST include any local files you want to upload here. Reference them in replace text with Markdown links (e.g., ![alt](filename)) or {{attachment:filename}}. They will be automatically uploaded and the URLs in the text replaced.",
         },
       },
       oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
@@ -494,7 +494,7 @@ New documents are created in collection: ${defaultCollectionId || "the configure
           minLength: 1,
           maxLength: 100000,
           description:
-            "Markdown content. Embed attachments using standard links ![alt](filename) or {{attachment:filename}} placeholders.",
+            "Markdown content. You MUST include any local files you want to upload in the 'attachments' parameter. Reference them using standard links ![alt](filename) or {{attachment:filename}} placeholders; these will be automatically replaced with Outline attachment URLs.",
         },
         publish: {
           type: "boolean",
@@ -549,7 +549,7 @@ New documents are created in collection: ${defaultCollectionId || "the configure
             ],
           },
           description:
-            "Optional attachments to upload and associate with the document.",
+            "Optional attachments to upload. You MUST include any local files referenced in the text here for them to be automatically uploaded and replaced.",
         },
       },
       required: ["title", "text"],
