@@ -1225,4 +1225,242 @@ describe("Outline MCP Server Tools - Attachments", () => {
       expect.any(Object),
     );
   });
+
+  it("should advertise comment tools with a no-curl instruction", () => {
+    const tools = getTools("sandbox-collection");
+    const names = tools.map((tool) => tool.name);
+
+    expect(names).toEqual(
+      expect.arrayContaining(["comments-list", "comments-get", "comments-create"]),
+    );
+
+    const createTool = tools.find((tool) => tool.name === "comments-create");
+    expect(createTool.inputSchema.properties.parentCommentId).toBeDefined();
+    expect(createTool.inputSchema.required).toContain("text");
+    expect(createTool.description).toContain("sandbox-collection");
+  });
+
+  it("should flatten ProseMirror comment bodies to text in comments-list", async () => {
+    const canonicalUuid = "406fba79-639a-44a7-9aeb-02be400d0287";
+
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.info (short ID -> canonical UUID for comments.list)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: canonicalUuid, collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 3. Mock comments.list
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: [
+          {
+            id: "comment-1",
+            documentId: canonicalUuid,
+            parentCommentId: null,
+            createdById: "user-1",
+            createdAt: "2026-01-01T00:00:00Z",
+            data: {
+              type: "doc",
+              content: [
+                {
+                  type: "paragraph",
+                  content: [{ type: "text", text: "Looks good to me" }],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await handleCallTool(
+      {
+        params: {
+          name: "comments-list",
+          arguments: { documentId: "doc-123" },
+        },
+      },
+      config,
+    );
+
+    // documents.info resolves the short ID before comments.list is called.
+    expect(axiosMock.post).toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.info"),
+      { id: "123" },
+      expect.any(Object),
+    );
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/comments.list"),
+      { documentId: canonicalUuid },
+      expect.any(Object),
+    );
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      comments: [
+        {
+          id: "comment-1",
+          documentId: canonicalUuid,
+          text: "Looks good to me",
+          createdById: "user-1",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+  });
+
+  it("should skip document resolution in comments-list when given a UUID", async () => {
+    const canonicalUuid = "406fba79-639a-44a7-9aeb-02be400d0287";
+
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock comments.list (no documents.info needed for a UUID input)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: [] },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "comments-list",
+          arguments: { documentId: canonicalUuid, limit: 10 },
+        },
+      },
+      config,
+    );
+
+    // Only the one-time parent resolution hits documents.info; the handler adds none.
+    expect(
+      axiosMock.post.mock.calls.filter((c) => c[0].endsWith("/api/documents.info")),
+    ).toHaveLength(1);
+    expect(axiosMock.post).not.toHaveBeenCalledWith(
+      expect.stringContaining("/api/documents.info"),
+      { id: canonicalUuid },
+      expect.any(Object),
+    );
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/comments.list"),
+      { documentId: canonicalUuid, limit: 10 },
+      expect.any(Object),
+    );
+  });
+
+  it("should create a comment on a sandbox document", async () => {
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.info (sandbox check)
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "406fba79-639a-44a7-9aeb-02be400d0287",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+
+    // 3. Mock comments.create
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "comment-new", documentId: "406fba79-639a-44a7-9aeb-02be400d0287" } },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "comments-create",
+          arguments: { documentId: "short-123", text: "Nice work" },
+        },
+      },
+      config,
+    );
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/comments.create"),
+      {
+        documentId: "406fba79-639a-44a7-9aeb-02be400d0287",
+        text: "Nice work",
+      },
+      expect.any(Object),
+    );
+  });
+
+  it("should pass parentCommentId through when replying in comments-create", async () => {
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "406fba79-639a-44a7-9aeb-02be400d0287",
+          collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc",
+        },
+      },
+    });
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "comment-reply" } },
+    });
+
+    await handleCallTool(
+      {
+        params: {
+          name: "comments-create",
+          arguments: {
+            documentId: "doc-123",
+            text: "Replying",
+            parentCommentId: "comment-1",
+          },
+        },
+      },
+      config,
+    );
+
+    expect(axiosMock.post).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/comments.create"),
+      expect.objectContaining({
+        text: "Replying",
+        parentCommentId: "comment-1",
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("should reject comments-create on documents outside the sandbox", async () => {
+    // 1. Mock parent info (resolution)
+    axiosMock.post.mockResolvedValueOnce({
+      data: { data: { id: "e5583450-d16e-4401-9cfb-5efd0c49320f", collectionId: "ad1f9489-44b8-4396-8850-6c45496781cc" } },
+    });
+
+    // 2. Mock documents.info with a DIFFERENT collection
+    axiosMock.post.mockResolvedValueOnce({
+      data: {
+        data: {
+          id: "doc-outside",
+          collectionId: "some-other-collection",
+        },
+      },
+    });
+
+    await expect(
+      handleCallTool(
+        {
+          params: {
+            name: "comments-create",
+            arguments: { documentId: "doc-outside", text: "Hi" },
+          },
+        },
+        config,
+      ),
+    ).rejects.toThrow("outside the sandbox collection and cannot be commented on");
+
+    expect(
+      axiosMock.post.mock.calls.some((c) => c[0].endsWith("/api/comments.create")),
+    ).toBe(false);
+  });
 });

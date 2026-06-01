@@ -323,7 +323,7 @@ export const getTools = (defaultCollectionId) => [
   {
     name: "documents-get",
     description:
-      "Get one Outline document. Never use curl or manual HTTP for Outline; use this tool. Returns metadata by default; set includeText=true only when full body is needed.",
+      "Get one Outline document. Never use curl or manual HTTP for Outline; use this tool. Provide exactly one of documentId or documentUrl. Returns metadata by default; set includeText=true only when full body is needed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -340,7 +340,6 @@ export const getTools = (defaultCollectionId) => [
           description: "Include full document text. Defaults to false to save tokens.",
         },
       },
-      oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
     },
   },
   {
@@ -391,6 +390,7 @@ export const getTools = (defaultCollectionId) => [
     name: "documents-patch",
     description: `Surgically update an existing Outline document with search and replace.
 Never use curl or manual HTTP for Outline; use this tool.
+- Provide exactly one of documentId or documentUrl to identify the document.
 - PREFERRED for edits to existing documents. Do not switch to documents-upsert unless you truly need full-document replacement.
 - The 'search' string MUST be unique within the document or the patch will fail.
 - TIP: Include surrounding context such as a nearby header or sentence to make 'search' unique.
@@ -463,7 +463,6 @@ Never use curl or manual HTTP for Outline; use this tool.
             "Optional attachments. You MUST include any local files you want to upload here. Reference them in replace text with Markdown links (e.g., ![alt](filename)) or {{attachment:filename}}. They will be automatically uploaded and the URLs in the text replaced.",
         },
       },
-      oneOf: [{ required: ["documentId"] }, { required: ["documentUrl"] }],
       required: ["patches"],
     },
   },
@@ -553,6 +552,88 @@ New documents are created in collection: ${defaultCollectionId || "the configure
         },
       },
       required: ["title", "text"],
+    },
+  },
+  {
+    name: "comments-list",
+    description:
+      "List comments on an Outline document. Never use curl or manual HTTP for Outline; use this tool. Reading is unrestricted. Provide exactly one of documentId or documentUrl.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        documentId: {
+          type: "string",
+          description: "Canonical UUID or Short ID of the document.",
+        },
+        documentUrl: {
+          type: "string",
+          description: "Full Outline URL of the document.",
+        },
+        includeAnchorText: {
+          type: "boolean",
+          description:
+            "Include the anchored document text for inline comments. Defaults to false.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          description: "Optional max number of comments to return.",
+        },
+      },
+    },
+  },
+  {
+    name: "comments-get",
+    description:
+      "Get one Outline comment by ID. Never use curl or manual HTTP for Outline; use this tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Canonical UUID of the comment.",
+        },
+        includeAnchorText: {
+          type: "boolean",
+          description:
+            "Include the anchored document text for inline comments. Defaults to false.",
+        },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "comments-create",
+    description: `Add a comment to an Outline document, or reply to an existing comment.
+Never use curl or manual HTTP for Outline; use this tool.
+- Provide exactly one of documentId or documentUrl to identify the document.
+- Set 'parentCommentId' to reply to an existing comment; omit it for a new top-level comment.
+- Commenting is sandbox-restricted: the target document must be in collection ${defaultCollectionId || "the configured sandbox collection"}.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        documentId: {
+          type: "string",
+          description: "Canonical UUID or Short ID of the document to comment on.",
+        },
+        documentUrl: {
+          type: "string",
+          description: "Full Outline URL of the document to comment on.",
+        },
+        text: {
+          type: "string",
+          minLength: 1,
+          maxLength: 100000,
+          description: "Markdown content of the comment.",
+        },
+        parentCommentId: {
+          type: "string",
+          description:
+            "Optional UUID of the comment being replied to. Omit for a top-level comment.",
+        },
+      },
+      required: ["text"],
     },
   },
 ];
@@ -712,6 +793,29 @@ function collectNodeText(node) {
   return node.children.map((child) => collectNodeText(child)).join(" ");
 }
 
+/**
+ * Flattens an Outline comment's ProseMirror body (`data`) into readable plain text.
+ * Comments are stored/returned as ProseMirror documents, not markdown, so we walk the
+ * node tree collecting text and inserting newlines at block boundaries.
+ */
+function proseMirrorToText(node) {
+  if (!node) return "";
+  if (node.type === "text") return node.text || "";
+
+  const children = Array.isArray(node.content)
+    ? node.content.map(proseMirrorToText).join("")
+    : "";
+
+  const blockTypes = [
+    "paragraph",
+    "heading",
+    "listItem",
+    "blockquote",
+    "code_block",
+  ];
+  return blockTypes.includes(node.type) ? `${children}\n` : children;
+}
+
 function trimExcerpt(text, maxLength) {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLength) return normalized;
@@ -804,6 +908,26 @@ function summarizeCollection(collection) {
       urlId: collection.urlId,
       description: collection.description,
     }).filter(([, value]) => value !== undefined),
+  );
+}
+
+function summarizeComment(comment) {
+  if (!comment) return null;
+
+  return Object.fromEntries(
+    Object.entries({
+      id: comment.id,
+      documentId: comment.documentId,
+      parentCommentId: comment.parentCommentId,
+      text: comment.data ? proseMirrorToText(comment.data).trim() : undefined,
+      anchorText: comment.anchorText,
+      createdById: comment.createdById,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      resolvedAt: comment.resolvedAt,
+    }).filter(
+      ([, value]) => value !== undefined && value !== null && value !== "",
+    ),
   );
 }
 
@@ -1107,6 +1231,101 @@ export async function handleCallTool(request, config) {
       );
 
       return compactToolResult(result);
+    }
+
+    case "comments-list": {
+      const input = validateOneOf(
+        args,
+        ["documentId", "documentUrl"],
+        true, // required
+      );
+      const argId = extractId(input, outlineUrl);
+
+      // comments.list requires a UUID documentId. URL/short-ID inputs resolve
+      // through documents.info first (which accepts them natively), as
+      // comments-create already does.
+      let documentId = argId;
+      if (!isUuid(argId)) {
+        const docInfo = await callOutline(
+          "/api/documents.info",
+          { id: argId },
+          outlineConfig,
+        );
+        documentId = docInfo.data.id;
+      }
+
+      const result = await callOutline(
+        "/api/comments.list",
+        {
+          documentId,
+          ...(args.includeAnchorText ? { includeAnchorText: true } : {}),
+          ...(args.limit ? { limit: args.limit } : {}),
+        },
+        outlineConfig,
+      );
+      return compactToolResult({
+        comments: (result.data || []).map((comment) =>
+          summarizeComment(comment),
+        ),
+      });
+    }
+
+    case "comments-get": {
+      const result = await callOutline(
+        "/api/comments.info",
+        {
+          id: args.id,
+          ...(args.includeAnchorText ? { includeAnchorText: true } : {}),
+        },
+        outlineConfig,
+      );
+      return compactToolResult({
+        comment: summarizeComment(result.data),
+      });
+    }
+
+    case "comments-create": {
+      const input = validateOneOf(
+        args,
+        ["documentId", "documentUrl"],
+        true, // required
+      );
+      const argId = extractId(input, outlineUrl);
+
+      if (!defaultCollectionId) {
+        throw new Error(
+          "Server missing sandbox configuration. Please set OUTLINE_DEFAULT_COLLECTION_ID or OUTLINE_DEFAULT_PARENT_DOCUMENT_ID in your environment.",
+        );
+      }
+
+      // Enforce Sandboxing: the target document must belong to the default collection.
+      const docInfo = await callOutline(
+        "/api/documents.info",
+        {
+          id: argId,
+        },
+        outlineConfig,
+      );
+      if (docInfo.data.collectionId !== defaultCollectionId) {
+        throw new Error(
+          `Document ${argId} is outside the sandbox collection and cannot be commented on.`,
+        );
+      }
+
+      const result = await callOutline(
+        "/api/comments.create",
+        {
+          documentId: docInfo.data.id, // Use UUID for efficiency
+          text: args.text,
+          ...(args.parentCommentId
+            ? { parentCommentId: args.parentCommentId }
+            : {}),
+        },
+        outlineConfig,
+      );
+      return compactToolResult({
+        comment: summarizeComment(result.data),
+      });
     }
 
     default:
