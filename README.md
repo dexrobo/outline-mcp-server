@@ -104,7 +104,8 @@ If you prefer not to use a config file, replace `<tool>` with **claude**, **code
     - **Enforcement:** The server strictly enforces that all document creations and updates occur within the `OUTLINE_DEFAULT_COLLECTION_ID`.
     - **Creation:** The `documents-upsert` tool **forces** all new documents into the configured collection. The AI agent may specify a `parentDocumentId`; if omitted, it defaults to `OUTLINE_DEFAULT_PARENT_DOCUMENT_ID` (if set) or they may be created at the top level of the collection. Any specified parent must belong to the sandbox collection.
     - **Updates:** If an `id` is provided to `documents-upsert`, the server verifies the document belongs to the sandbox collection before allowing the update.
-    - **Read Access:** `documents-list`, `documents-get`, and `documents-search` can access any document the API token can see.
+    - **Read Access:** `documents-list`, `documents-get`, `documents-search`, `comments-list`, and `comments-get` can access any document the API token can see.
+    - **Comments:** `comments-create` is restricted to documents within the sandbox collection, mirroring document creation/updates.
 - **Rate Limit:** Outline API calls are subject to the rate limits of your Outline instance.
 - **No Deletion:** For security, this MCP server does not currently expose any deletion tools.
 
@@ -139,6 +140,15 @@ The discovery URL will be `http://localhost:3000/mcp`.
         - **Base64:** Small files can be provided as base64 content.
         - **Markdown Integration:** You can link to attachments using standard Markdown syntax like `![Alt text](local/path/to/image.png)` or `[Download](filename.pdf)`. The server will automatically replace these with the correct attachment IDs.
         - **Explicit Placeholder:** Alternatively, use `{{attachment:filename}}` to get just the attachment ID.
+- `comments-list`: List comments on a document.
+- `comments-get`: Retrieve a single comment by ID.
+- `comments-create`: Add a comment to a document, or reply to one (set `parentCommentId`).
+
+### Comments
+
+- **Viewing:** `comments-list` and `comments-get` can read comments on any document the API token can see (unrestricted, like the document read tools).
+- **Adding & replying:** `comments-create` is sandbox-restricted — the target document must belong to `OUTLINE_DEFAULT_COLLECTION_ID`. Set `parentCommentId` to reply to an existing comment; omit it for a new top-level comment.
+- **No edit/delete:** Consistent with the no-deletion policy, the server does not expose comment update or delete tools.
 
 ## Development
 
